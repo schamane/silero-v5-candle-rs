@@ -1,5 +1,5 @@
-//! Silero v5_ru nativ in Rust: Akzentor, Homograph-Löser, FastPitch-Netze und
-//! ISTFT-Vocoder in `candle`.
+//! Silero v5 nativ in Rust: russischer und ukrainischer Akzentor, Homograph-Löser,
+//! FastPitch-Netze und ISTFT-Vocoder in `candle`.
 
 pub mod acoustic;
 pub mod config;
@@ -17,6 +17,7 @@ use acoustic::forward::Acoustic;
 use config::Config;
 use error::stage;
 use text::accentor::{AccentOptions, Accentor};
+use text::accentor_uk::{StressOptions, UkrainianAccentor};
 use text::homosolver::{HomoSolver, SolveOptions};
 use text::normalize::{PreparedText, prepare_text_input, split_chunks};
 use vocoder::convnext::Backbone;
@@ -30,11 +31,27 @@ pub const SAMPLE_RATE: u32 = 48_000;
 /// (`split_chunks(text, 400)`) und hält Text unter den Positionsgrenzen von BERT und Akustik.
 pub const CHUNK_LIMIT: usize = 400;
 
+/// Betonungsmodell eines Pakets; die Variante macht ungültige Kombinationen
+/// unrepräsentierbar. Ein Modell hält genau eine Instanz; Boxen spart hier nichts.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "ein Modell hält genau eine Instanz; Boxen spart hier nichts"
+)]
+enum StressModel {
+    /// `v5_ru`: Homograph-Löser läuft vor dem Akzentor.
+    Ru {
+        accentor: Accentor,
+        homosolver: HomoSolver,
+    },
+    /// `v5_cis_base_nostress`: ein Akzentor ohne Homograph-Löser.
+    Uk(UkrainianAccentor),
+}
+
 pub struct Silero {
     config: Config,
     acoustic: Acoustic,
-    accentor: Accentor,
-    homosolver: HomoSolver,
+    /// `None` bei `v5_cis_ext`: der Aufrufer setzt die Betonung mit `+`.
+    stress: Option<StressModel>,
     backbone: Backbone,
     head: Head,
     device: Device,
@@ -57,8 +74,13 @@ impl Silero {
             VarBuilder::from_mmaped_safetensors(std::slice::from_ref(&weights), DType::F32, &device)
                 .map_err(|e| Error::Model(format!("{}: {e}", weights.display())))?
         };
-        let acoustic = Acoustic::load(vb.clone(), &device)
-            .map_err(|e| Error::Model(format!("acoustic: {e}")))?;
+        let acoustic = Acoustic::load(
+            vb.clone(),
+            &device,
+            config.symbol_count(),
+            config.speaker_count(),
+        )
+        .map_err(|e| Error::Model(format!("acoustic: {e}")))?;
         let backbone = Backbone::load(vb.pp("vocoder.backbone"))
             .map_err(|e| Error::Model(format!("vocoder: {e}")))?;
         let window = candle_core::safetensors::load(dir.join("istft_window.safetensors"), &device)
@@ -83,14 +105,28 @@ impl Silero {
             config.win_length,
         )
         .map_err(|e| Error::Model(format!("vocoder.head: {e}")))?;
-        let accentor = Accentor::load(dir, &device)?;
-        let homosolver =
-            HomoSolver::load(dir, &device, config.bert.clone(), config.tokenizer.clone())?;
+        let stress = match (
+            config.bert.clone(),
+            config.tokenizer.clone(),
+            config.accentor.clone(),
+        ) {
+            (Some(bert), Some(tokenizer), None) => Some(StressModel::Ru {
+                accentor: Accentor::load(dir, &device)?,
+                homosolver: HomoSolver::load(dir, &device, bert, tokenizer)?,
+            }),
+            (None, None, Some(_)) => Some(StressModel::Uk(UkrainianAccentor::load(dir, &device)?)),
+            (None, None, None) => None,
+            _ => {
+                return Err(Error::Model(format!(
+                    "{}: bert/tokenizer und accentor schließen sich aus",
+                    dir.display()
+                )));
+            }
+        };
         Ok(Self {
             config,
             acoustic,
-            accentor,
-            homosolver,
+            stress,
             backbone,
             head,
             device,
@@ -103,6 +139,25 @@ impl Silero {
 
     pub fn prepare(&self, text: &str) -> PreparedText {
         prepare_text_input(&self.config, text)
+    }
+
+    /// `true`, wenn das Modell Stress selbst setzt (`v5_ru`, `v5_cis_base_nostress`,
+    /// optional `v5_cis_ext`).
+    pub fn has_accentor(&self) -> bool {
+        self.config.has_accentor()
+    }
+
+    /// `true`, wenn der Akzentor für die Sprache dieser Stimme gilt. Ein
+    /// ukrainischer Akzentor im CIS-Paket betrifft nur `ukr_*`-Stimmen.
+    pub fn has_accentor_for(&self, voice: &str) -> bool {
+        self.config.has_accentor_for(voice)
+    }
+
+    /// Alle Sprecher-Namen aus `config.json`, sortiert.
+    pub fn voices(&self) -> Vec<&str> {
+        let mut names: Vec<&str> = self.config.speakers.keys().map(String::as_str).collect();
+        names.sort_unstable();
+        names
     }
 
     /// `apply_tts` für einen Chunk; Satzteilung und Pausen liegen beim Aufrufer.
@@ -143,15 +198,24 @@ impl Silero {
         if !prepared.has_text {
             return Err(Error::Input("text is empty".into()));
         }
-        let homo = self
-            .homosolver
-            .solve(&prepared.sentence, SolveOptions::default())?;
-        let accented = self.accentor.accent(
-            &homo,
-            AccentOptions::default(),
-            &HashSet::new(),
-            &HashSet::new(),
-        );
+        let homo = match &self.stress {
+            Some(StressModel::Ru { homosolver, .. }) => {
+                homosolver.solve(&prepared.sentence, SolveOptions::default())?
+            }
+            _ => prepared.sentence.clone(),
+        };
+        let accented = match &self.stress {
+            Some(StressModel::Ru { accentor, .. }) => accentor.accent(
+                &homo,
+                AccentOptions::default(),
+                &HashSet::new(),
+                &HashSet::new(),
+            ),
+            Some(StressModel::Uk(accentor)) if self.config.accentor_matches(voice) => {
+                accentor.accent(&prepared.sentence, StressOptions::default())
+            }
+            Some(StressModel::Uk(_)) | None => prepared.sentence.clone(),
+        };
         let ids = self.config.sequence(&accented)?;
         let speaker = self.config.speaker_id(voice)?;
         let output = self
@@ -202,7 +266,10 @@ impl Silero {
         if !prepared.has_text {
             return Ok(None);
         }
-        self.homosolver.logits(&prepared.sentence)
+        match &self.stress {
+            Some(StressModel::Ru { homosolver, .. }) => homosolver.logits(&prepared.sentence),
+            _ => Ok(None),
+        }
     }
 
     pub fn device(&self) -> &Device {

@@ -8,9 +8,7 @@ use serde::Deserialize;
 use crate::error::io_at;
 use crate::{Error, Result};
 
-/// Feste Architektur des Silero-v5_ru-Pakets; `config.json` muss dazu passen.
-pub const SYMBOL_COUNT: usize = 47;
-pub const SPEAKER_COUNT: usize = 5;
+/// Obergrenze der Positional-Encoding-Tabellen; gilt für alle v5-Pakete.
 pub const MAX_POSITIONS: usize = 5000;
 
 /// Werte, die `scripts/export_silero.py` aus dem TorchScript-Paket liest.
@@ -27,14 +25,30 @@ pub struct Config {
     pub hop_length: usize,
     pub win_length: usize,
     pub max_positions: usize,
-    pub bert: BertConfig,
-    pub tokenizer: TokenizerConfig,
+    /// Anzahl der Zeilen in den Speaker-Embeddings. Fehlt im Feld, wird sie aus
+    /// der größten Sprecher-ID abgeleitet; `v5_cis_ext` hat eine Lücke in den IDs.
+    #[serde(default)]
+    pub speaker_rows: Option<usize>,
+    /// Nur `v5_ru`/`v5_6_ru` haben Akzentor und Homograph-Löser.
+    #[serde(default)]
+    pub bert: Option<BertConfig>,
+    #[serde(default)]
+    pub tokenizer: Option<TokenizerConfig>,
+    /// Ukrainischer Akzentor (`v5_cis_base_nostress`).
+    #[serde(default)]
+    pub accentor: Option<AccentorConfig>,
     /// Einzelzeichen-Schlüssel aus `symbol_to_id`, für `symbol_id` ohne Allokation.
     #[serde(skip)]
     char_ids: HashMap<char, u32>,
     /// `symbols[3:]` plus `^`, für `prepare_text_input`.
     #[serde(skip)]
     allowed: HashSet<char>,
+    /// Zeilen der Symbol-Embeddings (`max(symbol_to_id) + 1`).
+    #[serde(skip)]
+    symbol_count: usize,
+    /// Zeilen der Speaker-Embeddings.
+    #[serde(skip)]
+    speaker_count: usize,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -68,6 +82,12 @@ pub struct TokenizerConfig {
     pub homo_end_id: u32,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct AccentorConfig {
+    /// Sprachcode des Akzentors; derzeit nur `ukr`.
+    pub lang: String,
+}
+
 impl Config {
     /// Liest `config.json`, prüft es gegen die feste Architektur und baut die Lookup-Tabellen.
     ///
@@ -80,18 +100,8 @@ impl Config {
         let text = std::fs::read_to_string(path).map_err(io_at(path))?;
         let mut config: Self = serde_json::from_str(&text)
             .map_err(|e| Error::Model(format!("{}: {e}", path.display())))?;
-        if config.symbols.chars().count() != SYMBOL_COUNT {
-            return Err(Error::Model(format!(
-                "{}: erwartet {SYMBOL_COUNT} Symbole",
-                path.display()
-            )));
-        }
-        if config.symbol_to_id.len() != SYMBOL_COUNT {
-            return Err(Error::Model(format!(
-                "{}: {} Symbol-IDs statt {SYMBOL_COUNT}",
-                path.display(),
-                config.symbol_to_id.len()
-            )));
+        if config.symbols.is_empty() {
+            return Err(Error::Model(format!("{}: keine Symbole", path.display())));
         }
         let char_ids: HashMap<char, u32> = config
             .symbol_to_id
@@ -107,25 +117,79 @@ impl Config {
         if config.symbols.chars().any(|ch| !char_ids.contains_key(&ch)) {
             return Err(Error::Model(format!("{}: Symbol ohne ID", path.display())));
         }
-        check_dense_ids(
-            path,
-            "Symbol",
-            config.symbol_to_id.values().copied().collect(),
-            SYMBOL_COUNT,
-        )?;
-        if config.speakers.len() != SPEAKER_COUNT {
+        let symbol_count = config
+            .symbol_to_id
+            .values()
+            .copied()
+            .max()
+            .map_or(0, |max| max as usize + 1);
+        if symbol_count != config.symbol_to_id.len() {
             return Err(Error::Model(format!(
-                "{}: {} Sprecher statt {SPEAKER_COUNT}",
+                "{}: {} Symbol-IDs, aber IDs bis {}",
                 path.display(),
-                config.speakers.len()
+                config.symbol_to_id.len(),
+                symbol_count.saturating_sub(1)
             )));
         }
         check_dense_ids(
             path,
-            "Sprecher",
-            config.speakers.values().copied().collect(),
-            SPEAKER_COUNT,
+            "Symbol",
+            config.symbol_to_id.values().copied().collect(),
+            symbol_count,
         )?;
+        let speaker_max = config
+            .speakers
+            .values()
+            .copied()
+            .max()
+            .map_or(0, |max| max as usize + 1);
+        let speaker_count = config.speaker_rows.unwrap_or(speaker_max);
+        if speaker_count < speaker_max || speaker_count == 0 {
+            return Err(Error::Model(format!(
+                "{}: speaker_rows {speaker_count} deckt Sprecher-IDs bis {} nicht ab",
+                path.display(),
+                speaker_max.saturating_sub(1)
+            )));
+        }
+        let mut seen = HashSet::with_capacity(config.speakers.len());
+        if let Some(duplicate) = config
+            .speakers
+            .values()
+            .copied()
+            .find(|id| !seen.insert(*id))
+        {
+            return Err(Error::Model(format!(
+                "{}: doppelte Sprecher-ID {duplicate}",
+                path.display()
+            )));
+        }
+        if config.bert.is_some() != config.tokenizer.is_some() {
+            return Err(Error::Model(format!(
+                "{}: bert und tokenizer müssen gemeinsam vorhanden sein",
+                path.display()
+            )));
+        }
+        if let Some(accentor) = &config.accentor {
+            if accentor.lang != "ukr" {
+                return Err(Error::Model(format!(
+                    "{}: Akzentor-Sprache {:?} statt \"ukr\"",
+                    path.display(),
+                    accentor.lang
+                )));
+            }
+            if config.bert.is_some() {
+                return Err(Error::Model(format!(
+                    "{}: russischer und ukrainischer Akzentor schließen sich aus",
+                    path.display()
+                )));
+            }
+            if !char_ids.contains_key(&'+') {
+                return Err(Error::Model(format!(
+                    "{}: Akzentor braucht '+' im Symbolalphabet",
+                    path.display()
+                )));
+            }
+        }
         if config.sample_rate != crate::SAMPLE_RATE {
             return Err(Error::Model(format!(
                 "{}: sample_rate {} statt {}",
@@ -142,8 +206,53 @@ impl Config {
             )));
         }
         config.char_ids = char_ids;
-        config.allowed = config.symbols.chars().skip(3).chain(['^']).collect();
+        // Die v5_cis-Symboltabelle beginnt mit `|!'`; ein blindes `skip(3)` würde
+        // `!` und `'` verschlucken. `_`, `~` und `|` bleiben Steuerzeichen.
+        config.allowed = config
+            .symbols
+            .chars()
+            .filter(|ch| !matches!(ch, '_' | '~' | '|'))
+            .chain(['^'])
+            .collect();
+        config.symbol_count = symbol_count;
+        config.speaker_count = speaker_count;
         Ok(config)
+    }
+
+    /// Zeilen der Symbol-Embeddings (`max(symbol_to_id) + 1`).
+    pub fn symbol_count(&self) -> usize {
+        self.symbol_count
+    }
+
+    /// Zeilen der Speaker-Embeddings.
+    pub fn speaker_count(&self) -> usize {
+        self.speaker_count
+    }
+
+    /// `true`, wenn das Paket die Betonung selbst setzt: russischer Akzentor
+    /// (`v5_ru`) oder ukrainischer Akzentor (`v5_cis_base_nostress`, optional
+    /// auch `v5_cis_ext`).
+    pub fn has_accentor(&self) -> bool {
+        self.bert.is_some() || self.accentor.is_some()
+    }
+
+    /// `true`, wenn der Akzentor auf die Sprache der Stimme passt. Die Sprache
+    /// steht vor dem ersten `_` (`ukr_igor` → `ukr`). Der ukrainische Akzentor
+    /// darf z. B. keine kaukasischen Stimmen im CIS-Paket verändern.
+    pub fn accentor_matches(&self, voice: &str) -> bool {
+        self.accentor
+            .as_ref()
+            .is_some_and(|accentor| voice.split('_').next() == Some(accentor.lang.as_str()))
+    }
+
+    /// `true`, wenn diese Stimme beim Laden die Betonung selbst setzt.
+    pub fn has_accentor_for(&self, voice: &str) -> bool {
+        self.bert.is_some() || self.accentor_matches(voice)
+    }
+
+    /// `true`, wenn `ch` im Symbolalphabet des Pakets vorkommt.
+    pub fn has_symbol(&self, ch: char) -> bool {
+        self.char_ids.contains_key(&ch)
     }
 
     /// IDs für `|text~`, wie `preprocess_tacotron`.

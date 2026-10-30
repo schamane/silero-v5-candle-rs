@@ -4,7 +4,7 @@
 name = "silero-v5-candle-rs"
 version = "0.1.0"
 edition = "2024"
-description = "Silero v5_ru TTS in Rust (candle)"
+description = "Silero v5 TTS in Rust (candle): v5_ru, v5_cis_ext and v5_cis_base_nostress"
 license = "CC-BY-NC-SA-4.0"
 readme = "README.md"
 publish = false

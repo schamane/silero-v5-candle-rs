@@ -4,10 +4,11 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use candle_core::{Device, Tensor};
+use candle_core::Device;
 
 use crate::config::Config;
 use crate::error::io_at;
+use crate::text::ngram::{Linear, NgramEmbedding, run_mlp, softmax_argmax};
 use crate::text::normalize::prepare_text_input;
 use crate::{Error, Result};
 
@@ -50,73 +51,8 @@ impl Default for AccentOptions {
     }
 }
 
-#[derive(Debug)]
-struct Linear {
-    w: Vec<f32>,
-    b: Vec<f32>,
-    out: usize,
-    in_dim: usize,
-}
-
-impl Linear {
-    fn load(
-        tensors: &HashMap<String, Tensor>,
-        prefix: &str,
-        out: usize,
-        in_dim: usize,
-    ) -> Result<Self> {
-        let w = tensor_vec(tensors, &format!("{prefix}.weight"))?;
-        let b = tensor_vec(tensors, &format!("{prefix}.bias"))?;
-        if w.len() != out * in_dim {
-            return Err(Error::Model(format!(
-                "{prefix}.weight: {} Werte statt {out}x{in_dim}",
-                w.len()
-            )));
-        }
-        if b.len() != out {
-            return Err(Error::Model(format!(
-                "{prefix}.bias: {} Werte statt {out}",
-                b.len()
-            )));
-        }
-        Ok(Self { w, b, out, in_dim })
-    }
-
-    fn forward(&self, x: &[f32]) -> Vec<f32> {
-        assert_eq!(
-            x.len(),
-            self.in_dim,
-            "Linear: Eingabe {} statt {}",
-            x.len(),
-            self.in_dim
-        );
-        let mut y = vec![0.0; self.out];
-        for (o, slot) in y.iter_mut().enumerate() {
-            let row = &self.w[o * self.in_dim..(o + 1) * self.in_dim];
-            let mut sum = self.b[o];
-            for (w, x) in row.iter().zip(x) {
-                sum += w * x;
-            }
-            *slot = sum;
-        }
-        y
-    }
-}
-
-fn tensor_vec(tensors: &HashMap<String, Tensor>, name: &str) -> Result<Vec<f32>> {
-    let tensor = tensors
-        .get(name)
-        .ok_or_else(|| Error::Model(format!("{name} fehlt in accentor.safetensors")))?;
-    tensor
-        .flatten_all()
-        .and_then(|tensor| tensor.to_vec1::<f32>())
-        .map_err(|error| Error::Model(format!("{name}: {error}")))
-}
-
 pub struct Accentor {
-    ngrams: HashMap<String, u32>,
-    embedding: Vec<f32>,
-    dim: usize,
+    embedding: NgramEmbedding,
     stress: Vec<Linear>,
     yo: Vec<Linear>,
     exceptions: HashMap<String, (i32, i32)>,
@@ -127,11 +63,6 @@ impl Accentor {
     ///
     /// # Errors
     ///
-    /// Gibt einen Fehler zurück, wenn eine Datei fehlt, eine Form oder Anzahl nicht
-    /// passt oder ein n-Gramm beziehungsweise Ausnahmewort doppelt vorkommt.
-    ///
-    /// # Errors
-    ///
     /// Gibt [`Error::Io`] zurück, wenn eine Datei nicht gelesen werden kann, und sonst
     /// [`Error::Model`], wenn eine Datei fehlt, eine Form oder Anzahl nicht passt oder ein
     /// n-Gramm beziehungsweise Ausnahmewort doppelt vorkommt.
@@ -139,30 +70,14 @@ impl Accentor {
         let path = dir.join("accentor.safetensors");
         let tensors = candle_core::safetensors::load(&path, device)
             .map_err(|e| Error::Model(format!("{}: {e}", path.display())))?;
-        let embedding = tensor_vec(&tensors, "embedding.weight")?;
-        let dim = EMBEDDING_DIM;
-        if embedding.len() != NGRAM_COUNT * dim {
-            return Err(Error::Model(
-                "accentor.safetensors: unerwartete Embedding-Form".into(),
-            ));
-        }
-        let mut ngrams = HashMap::with_capacity(NGRAM_COUNT);
         let ngrams_path = dir.join("ngrams.txt");
-        let text = std::fs::read_to_string(&ngrams_path).map_err(io_at(ngrams_path))?;
-        for (id, gram) in text.lines().enumerate() {
-            if ngrams.insert(gram.to_string(), id as u32).is_some() {
-                return Err(Error::Model(format!(
-                    "ngrams.txt: doppeltes n-Gramm {gram:?} in Zeile {}",
-                    id + 1
-                )));
-            }
-        }
-        if ngrams.len() != NGRAM_COUNT {
-            return Err(Error::Model(format!(
-                "ngrams.txt: {} statt {NGRAM_COUNT} Einträge",
-                ngrams.len()
-            )));
-        }
+        let embedding = NgramEmbedding::load(
+            &ngrams_path,
+            &tensors,
+            "embedding",
+            NGRAM_COUNT,
+            EMBEDDING_DIM,
+        )?;
         let stress = vec![
             Linear::load(&tensors, "stress_clf.0", 64, 16)?,
             Linear::load(&tensors, "stress_clf.2", 128, 64)?,
@@ -199,58 +114,11 @@ impl Accentor {
             )));
         }
         Ok(Self {
-            ngrams,
             embedding,
-            dim,
             stress,
             yo,
             exceptions,
         })
-    }
-
-    /// `word_ngrams(word, 1, len+3)`, dann `embedding_bag(mean)`. `UNK` wird nur
-    /// verwendet, wenn kein n-Gramm im Vokabular liegt.
-    fn word_vector(&self, word: &[char]) -> Vec<f32> {
-        let max_len = word.len() + 3;
-        let mut wrapped = Vec::with_capacity(word.len() + 2);
-        wrapped.push('<');
-        wrapped.extend_from_slice(word);
-        wrapped.push('>');
-        let mut ids = Vec::new();
-        // Ein Puffer für alle n-Gramme. `clear` behält die Kapazität.
-        let mut gram = String::new();
-        for n in 1..=max_len {
-            if n > wrapped.len() {
-                continue;
-            }
-            for start in 0..=wrapped.len() - n {
-                gram.clear();
-                gram.extend(&wrapped[start..start + n]);
-                if let Some(id) = self.ngrams.get(gram.as_str()) {
-                    ids.push(*id as usize);
-                }
-            }
-        }
-        if word.is_empty()
-            && let Some(id) = self.ngrams.get("")
-        {
-            ids.push(*id as usize);
-        }
-        if ids.is_empty() {
-            ids.push(*self.ngrams.get("UNK").unwrap_or(&0) as usize);
-        }
-        let mut mean = vec![0.0f32; self.dim];
-        for id in &ids {
-            let row = &self.embedding[id * self.dim..(id + 1) * self.dim];
-            for (slot, value) in mean.iter_mut().zip(row) {
-                *slot += value;
-            }
-        }
-        let count = ids.len() as f32;
-        for value in &mut mean {
-            *value /= count;
-        }
-        mean
     }
 
     /// Logits beider Köpfe für die maskierten Wörter.
@@ -258,23 +126,10 @@ impl Accentor {
         words
             .iter()
             .map(|word| {
-                let vector = self.word_vector(word);
-                (self.mlp(&self.stress, &vector), self.mlp(&self.yo, &vector))
+                let vector = self.embedding.word_vector(word);
+                (run_mlp(&self.stress, &vector), run_mlp(&self.yo, &vector))
             })
             .collect()
-    }
-
-    fn mlp(&self, layers: &[Linear], input: &[f32]) -> Vec<f32> {
-        let mut x = input.to_vec();
-        for (index, layer) in layers.iter().enumerate() {
-            x = layer.forward(&x);
-            if index + 1 < layers.len() {
-                for value in &mut x {
-                    *value = value.max(0.0);
-                }
-            }
-        }
-        x
     }
 
     /// Portierung von `AccentorNgram.__call__` für eine Zeile.
@@ -484,22 +339,6 @@ fn split_on(word: &[char], sep: char) -> Vec<Vec<char>> {
     }
     parts.push(current);
     parts
-}
-
-fn softmax_argmax(logits: &[f32]) -> (Vec<f32>, usize) {
-    let max = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-    let mut probs: Vec<f32> = logits.iter().map(|value| (value - max).exp()).collect();
-    let sum: f32 = probs.iter().sum();
-    for value in &mut probs {
-        *value /= sum;
-    }
-    let mut argmax = 0;
-    for (index, value) in probs.iter().enumerate() {
-        if *value > probs[argmax] {
-            argmax = index;
-        }
-    }
-    (probs, argmax)
 }
 
 fn get_positions(
