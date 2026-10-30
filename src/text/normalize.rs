@@ -27,8 +27,13 @@ pub fn prepare_text_input(config: &Config, text: &str) -> PreparedText {
         // zeichenweise Abbildung.
         for lower in ch.to_lowercase() {
             let lower = match lower {
-                '\u{2014}' => '\u{2013}', // — -> –
-                '\u{2011}' => '-',        // ‑ -> -
+                // RU kennt `–`; CIS nur `—`. Beide Pakete haben keinen Platz für
+                // das jeweils andere Zeichen, also auf das vorhandene abbilden.
+                '\u{2014}' if allowed.contains(&'\u{2013}') => '\u{2013}', // — -> –
+                '\u{2013}' if allowed.contains(&'\u{2014}') => '\u{2014}', // – -> —
+                '\u{2011}' => '-',                                         // ‑ -> -
+                // Typografische Apostrophe; CIS hat `'` im Alphabet.
+                '\u{2018}' | '\u{2019}' | '\u{02BC}' if allowed.contains(&'\'') => '\'',
                 other => other,
             };
             if allowed.contains(&lower) {
@@ -42,7 +47,9 @@ pub fn prepare_text_input(config: &Config, text: &str) -> PreparedText {
         .copied()
         .filter(|ch| matches!(ch, 'а'..='я' | '-' | ' '))
         .collect();
-    let has_text = sentence.iter().any(|ch| is_text_char(*ch));
+    // `sentence` ist bereits auf `symbols[3:]` gefiltert. Jeder Buchstabe daraus
+    // ist Text; für `v5_cis_ext` zählen so auch `і/ї/є/ґ`.
+    let has_text = sentence.iter().any(|ch| ch.is_alphabetic());
     PreparedText {
         sentence,
         clean,
@@ -275,6 +282,17 @@ mod tests {
         Some(Config::load(&path).unwrap_or_else(|err| panic!("config.json lädt nicht: {err}")))
     }
 
+    fn cis_config() -> Option<Config> {
+        use std::io::Write;
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("models/silero-v5-cis-ext/config.json");
+        if !path.is_file() {
+            let _ = writeln!(std::io::stderr(), "SKIP: {} fehlt", path.display());
+            return None;
+        }
+        Some(Config::load(&path).unwrap_or_else(|err| panic!("config.json lädt nicht: {err}")))
+    }
+
     fn as_string(chars: &[char]) -> String {
         chars.iter().collect()
     }
@@ -394,6 +412,17 @@ mod tests {
         );
         assert_eq!(prepared.clean.iter().collect::<String>(), "привет  да");
         assert!(prepared.has_text);
+    }
+
+    /// `v5_cis` hat `!` und `'` im Alphabet, aber nicht in `symbols[3:]`;
+    /// `–` fehlt dort ganz. Beides wird auf ein vorhandenes Symbol abgebildet.
+    #[test]
+    fn cis_keeps_apostrophes_exclamations_and_dashes() {
+        let Some(config) = cis_config() else { return };
+        let prepared = prepare_text_input(&config, "Пір’я! У кого – з вірності.");
+        assert_eq!(as_string(&prepared.sentence), "пір'я! у кого — з вірності.");
+        assert!(prepared.has_text);
+        assert!(prepare_text_input(&config, "Їжак").has_text);
     }
 
     #[test]

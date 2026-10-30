@@ -1,4 +1,4 @@
-silero-v5-candle-rs is a Rust port of Silero v5_ru.
+silero-v5-candle-rs is a Rust port of Silero v5 (v5_ru, v5_cis_ext and v5_cis_base_nostress).
 
 Original: Silero Models, https://github.com/snakers4/silero-models
 Copyright (c) Silero Team.
@@ -6,8 +6,15 @@ Licensed under CC BY-NC-SA 4.0:
 https://creativecommons.org/licenses/by-nc-sa/4.0/
 
 Modifications: reimplementation in Rust on candle, CPU only, 48 kHz mono output.
-The model package v5_ru.pt is not distributed with this repository;
-scripts/export_silero.py derives the tensors locally from the package
-(sha256 7ba04d42340fe0398042eed2e0d12d62e23096d626b1b9feff4dcb1309197ab4).
+The model packages are not distributed with this repository;
+scripts/export_silero.py derives the tensors locally from v5_ru.pt
+(sha256 7ba04d42340fe0398042eed2e0d12d62e23096d626b1b9feff4dcb1309197ab4),
+scripts/export_silero_cis.py from v5_cis_ext.pt
+(sha256 e8185323fc5a341c229f8a8c9928512f665bf2736021bc600512499d0506eed2,
+licensed CC BY-NC), scripts/export_silero_cis_nostress.py from
+v5_cis_base_nostress.pt (sha256 0405777e332906f0644e08a680f7cfdc2137ea864090079c1fdd30a43c1b8761,
+MIT), and scripts/export_accentor_uk.py from the silero-stress accentor
+(sha256 3a64944182f7e34ef831e990dc807246161e20c14c923506db0a20b8120ce13c, MIT,
+https://github.com/snakers4/silero-stress).
 
 This project is not affiliated with or endorsed by Silero.

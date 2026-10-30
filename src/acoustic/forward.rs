@@ -7,7 +7,7 @@ use candle_nn::{Conv1d, Conv1dConfig, Linear, Module, VarBuilder};
 use super::hourglass::HourGlass;
 use super::predictors::Predictors;
 use super::transformer::{ForwardTransformer, embedding};
-use crate::config::{MAX_POSITIONS, SPEAKER_COUNT, SYMBOL_COUNT};
+use crate::config::MAX_POSITIONS;
 
 pub struct Tacotron {
     embedding: Tensor,
@@ -20,10 +20,15 @@ pub struct Tacotron {
 }
 
 impl Tacotron {
-    pub fn load(vb: VarBuilder, device: &Device) -> Result<Self> {
-        let embedding = super::transformer::embedding_table(vb.pp("embedding"), SYMBOL_COUNT, 128)?;
+    pub fn load(
+        vb: VarBuilder,
+        device: &Device,
+        symbol_count: usize,
+        speaker_count: usize,
+    ) -> Result<Self> {
+        let embedding = super::transformer::embedding_table(vb.pp("embedding"), symbol_count, 128)?;
         let speaker_embedding =
-            super::transformer::embedding_table(vb.pp("speaker_embedding"), SPEAKER_COUNT, 128)?;
+            super::transformer::embedding_table(vb.pp("speaker_embedding"), speaker_count, 128)?;
         let encoder = ForwardTransformer::load(vb.pp("encoder"), 128, 512, 2, 4, 1e-5)?;
         let pitch_proj = candle_nn::conv1d(
             1,
@@ -163,9 +168,14 @@ pub struct AcousticOutput {
 }
 
 impl Acoustic {
-    pub fn load(vb: VarBuilder, device: &Device) -> Result<Self> {
-        let tacotron = Tacotron::load(vb.pp("tacotron"), device)?;
-        let predictors = Predictors::load(vb, device)?;
+    pub fn load(
+        vb: VarBuilder,
+        device: &Device,
+        symbol_count: usize,
+        speaker_count: usize,
+    ) -> Result<Self> {
+        let tacotron = Tacotron::load(vb.pp("tacotron"), device, symbol_count, speaker_count)?;
+        let predictors = Predictors::load(vb, device, symbol_count, speaker_count)?;
         Ok(Self {
             tacotron,
             predictors,

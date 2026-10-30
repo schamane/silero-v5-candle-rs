@@ -4,7 +4,6 @@ use candle_core::{Device, Result, Tensor};
 use candle_nn::{Linear, Module, VarBuilder};
 
 use super::transformer::{ForwardTransformer, embedding};
-use crate::config::{SPEAKER_COUNT, SYMBOL_COUNT};
 
 pub struct SeriesPredictor {
     embedding: Tensor,
@@ -15,10 +14,15 @@ pub struct SeriesPredictor {
 }
 
 impl SeriesPredictor {
-    pub fn load(vb: VarBuilder, device: &Device) -> Result<Self> {
-        let embedding = super::transformer::embedding_table(vb.pp("embedding"), SYMBOL_COUNT, 64)?;
+    pub fn load(
+        vb: VarBuilder,
+        device: &Device,
+        symbol_count: usize,
+        speaker_count: usize,
+    ) -> Result<Self> {
+        let embedding = super::transformer::embedding_table(vb.pp("embedding"), symbol_count, 64)?;
         let speaker =
-            super::transformer::embedding_table(vb.pp("speaker_embedding"), SPEAKER_COUNT, 64)?;
+            super::transformer::embedding_table(vb.pp("speaker_embedding"), speaker_count, 64)?;
         let transformer = ForwardTransformer::load(vb.pp("transformer"), 64, 64, 2, 4, 1e-5)?;
         let lin = candle_nn::linear(64, 1, vb.pp("lin"))?;
         Ok(Self {
@@ -50,9 +54,24 @@ pub struct Predictors {
 }
 
 impl Predictors {
-    pub fn load(vb: VarBuilder, device: &Device) -> Result<Self> {
-        let duration = SeriesPredictor::load(vb.pp("dur_predictor.dur_pred"), device)?;
-        let pitch = SeriesPredictor::load(vb.pp("pitch_predictor.pitch_pred"), device)?;
+    pub fn load(
+        vb: VarBuilder,
+        device: &Device,
+        symbol_count: usize,
+        speaker_count: usize,
+    ) -> Result<Self> {
+        let duration = SeriesPredictor::load(
+            vb.pp("dur_predictor.dur_pred"),
+            device,
+            symbol_count,
+            speaker_count,
+        )?;
+        let pitch = SeriesPredictor::load(
+            vb.pp("pitch_predictor.pitch_pred"),
+            device,
+            symbol_count,
+            speaker_count,
+        )?;
         Ok(Self { duration, pitch })
     }
 
