@@ -1,12 +1,12 @@
-# silero-v5-ru-candle-rs
+# silero-v5-candle-rs
 
 Silero v5_ru text-to-speech in Rust on [candle](https://github.com/huggingface/candle).
 One Russian plain-text chunk in, 48 kHz mono f32 PCM out. CPU only.
 
 The crate is a port of the Silero v5_ru TorchScript pipeline and owns all of it:
 
-- text frontend: normalisation, symbol mapping, chunk splitting;
-- homograph solver: rubert-tiny2-shaped BERT plus its classifier;
+- text frontend: normalization, symbol mapping, chunk splitting;
+- `HomoSolver`: rubert-tiny2-shaped BERT plus its classifier;
 - accentor: n-gram embedding, stress and `ё` heads, exception list;
 - acoustic model: duration/pitch predictors, encoder, LengthRegulator, HourGlass;
 - vocoder: ConvNeXt backbone, ISTFT head.
@@ -22,11 +22,16 @@ Not affiliated with or endorsed by Silero.
 ## Usage
 
 ```rust
-use silero_v5_ru_candle::Silero;
+use silero_v5_candle::Silero;
 
-let model = Silero::load(std::path::Path::new("models/silero-v5-ru"))?;
-let samples: Vec<f32> = model.synthesize("Привет, как дела?", "baya")?;
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let model = Silero::load(std::path::Path::new("models/silero-v5-ru"))?;
+    let samples: Vec<f32> = model.synthesize("Привет, как дела?", "baya")?;
+    Ok(())
+}
 ```
+
+Long text should use `Silero::synthesize_text`, which splits it into chunks of at most 400 characters and joins the audio without a pause.
 
 Five voices: `aidar`, `baya`, `kseniya`, `xenia`, `eugene`. Plain text only: no SSML
 pauses, no `speaker="random"`.
@@ -53,9 +58,15 @@ cargo test --release --test golden            # 34 sentences against the Python 
 cargo clippy --all-targets -- -D warnings
 ```
 
-Golden tests compare token IDs exactly, per-stage tensors within 1e-4…5e-3 and audio
-within 5e-3. Sentence 33 covers the padding path with two homographs of different BERT
-token counts. See `SPEC-STE.md` for the pipeline contract and the finding register.
+Set `SILERO_REQUIRE_GOLDEN=1` to fail instead of skipping when the model is missing, and to make a debug build fail instead of skipping the golden test.
+
+Golden tests compare token IDs exactly, per-stage tensors within 1e-4…5e-3 (shapes must
+match) and audio within 5e-3. The largest measured audio difference is 2.9e-3 (sentence 4,
+aidar); sentence 33 is about 3.9e-5. Sentence 33 covers the padding path with two homographs
+of different BERT token counts. `chunks_match_python` is a regression snapshot of
+`split_chunks` against `golden/chunks.json`, a mirror of the chunking in
+`scripts/export_silero.py`; it does not compare against the Python reference. See
+`SPEC-STE.md` for the pipeline contract and the finding register.
 
 ## Performance
 

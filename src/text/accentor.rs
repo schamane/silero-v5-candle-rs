@@ -7,14 +7,48 @@ use std::path::Path;
 use candle_core::{Device, Tensor};
 
 use crate::config::Config;
+use crate::error::io_at;
 use crate::text::normalize::prepare_text_input;
+use crate::{Error, Result};
 
 pub fn is_vowel(ch: char) -> bool {
     VOWELS.contains(&ch)
 }
 
 const VOWELS: [char; 10] = ['а', 'о', 'у', 'ы', 'э', 'и', 'е', 'я', 'ё', 'ю'];
+/// Wörter, die nicht betont werden. Der Vergleich erfolgt in Kleinschreibung.
 const STOP_WORDS: [&str; 1] = ["то"];
+/// Anzahl der Zeilen in `ngrams.txt`. Das Akzentor-Paket legt sie fest, `config.json`
+/// enthält sie nicht.
+const NGRAM_COUNT: usize = 126_523;
+/// Anzahl der Zeilen in `exceptions.tsv`. Das Akzentor-Paket legt sie fest, `config.json`
+/// enthält sie nicht.
+const EXCEPTION_COUNT: usize = 16_969;
+/// Embedding-Dimension des Akzentors, Form `embedding.weight` = `[NGRAM_COUNT, EMBEDDING_DIM]`.
+const EMBEDDING_DIM: usize = 16;
+
+/// Schalter für [`Accentor::accent`]. `Default` schaltet alle drei ein, wie die Pipeline sie
+/// nutzt.
+#[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
+pub struct AccentOptions {
+    /// Betonung setzen.
+    pub put_stress: bool,
+    /// `ё` setzen.
+    pub put_yo: bool,
+    /// Auch Wörter mit nur einem Vokal betonen.
+    pub stress_single_vowel: bool,
+}
+
+impl Default for AccentOptions {
+    fn default() -> Self {
+        Self {
+            put_stress: true,
+            put_yo: true,
+            stress_single_vowel: true,
+        }
+    }
+}
 
 #[derive(Debug)]
 struct Linear {
@@ -30,17 +64,20 @@ impl Linear {
         prefix: &str,
         out: usize,
         in_dim: usize,
-    ) -> Result<Self, String> {
+    ) -> Result<Self> {
         let w = tensor_vec(tensors, &format!("{prefix}.weight"))?;
         let b = tensor_vec(tensors, &format!("{prefix}.bias"))?;
         if w.len() != out * in_dim {
-            return Err(format!(
+            return Err(Error::Model(format!(
                 "{prefix}.weight: {} Werte statt {out}x{in_dim}",
                 w.len()
-            ));
+            )));
         }
         if b.len() != out {
-            return Err(format!("{prefix}.bias: {} Werte statt {out}", b.len()));
+            return Err(Error::Model(format!(
+                "{prefix}.bias: {} Werte statt {out}",
+                b.len()
+            )));
         }
         Ok(Self { w, b, out, in_dim })
     }
@@ -66,14 +103,14 @@ impl Linear {
     }
 }
 
-fn tensor_vec(tensors: &HashMap<String, Tensor>, name: &str) -> Result<Vec<f32>, String> {
+fn tensor_vec(tensors: &HashMap<String, Tensor>, name: &str) -> Result<Vec<f32>> {
     let tensor = tensors
         .get(name)
-        .ok_or_else(|| format!("{name} fehlt in accentor.safetensors"))?;
+        .ok_or_else(|| Error::Model(format!("{name} fehlt in accentor.safetensors")))?;
     tensor
         .flatten_all()
         .and_then(|tensor| tensor.to_vec1::<f32>())
-        .map_err(|error| format!("{name}: {error}"))
+        .map_err(|error| Error::Model(format!("{name}: {error}")))
 }
 
 pub struct Accentor {
@@ -86,26 +123,45 @@ pub struct Accentor {
 }
 
 impl Accentor {
-    pub fn load(dir: &Path, device: &Device) -> Result<Self, String> {
+    /// Lädt Gewichte, n-Gramm-Tabelle und Ausnahmen aus `dir`.
+    ///
+    /// # Errors
+    ///
+    /// Gibt einen Fehler zurück, wenn eine Datei fehlt, eine Form oder Anzahl nicht
+    /// passt oder ein n-Gramm beziehungsweise Ausnahmewort doppelt vorkommt.
+    ///
+    /// # Errors
+    ///
+    /// Gibt [`Error::Io`] zurück, wenn eine Datei nicht gelesen werden kann, und sonst
+    /// [`Error::Model`], wenn eine Datei fehlt, eine Form oder Anzahl nicht passt oder ein
+    /// n-Gramm beziehungsweise Ausnahmewort doppelt vorkommt.
+    pub fn load(dir: &Path, device: &Device) -> Result<Self> {
         let path = dir.join("accentor.safetensors");
         let tensors = candle_core::safetensors::load(&path, device)
-            .map_err(|e| format!("{}: {e}", path.display()))?;
+            .map_err(|e| Error::Model(format!("{}: {e}", path.display())))?;
         let embedding = tensor_vec(&tensors, "embedding.weight")?;
-        let dim = 16;
-        if embedding.len() != 126_523 * dim {
-            return Err("accentor.safetensors: unerwartete Embedding-Form".into());
-        }
-        let mut ngrams = HashMap::with_capacity(126_523);
-        let text = std::fs::read_to_string(dir.join("ngrams.txt"))
-            .map_err(|e| format!("ngrams.txt: {e}"))?;
-        for (id, gram) in text.lines().enumerate() {
-            ngrams.insert(gram.to_string(), id as u32);
-        }
-        if ngrams.len() != 126_523 {
-            return Err(format!(
-                "ngrams.txt: {} statt 126523 Einträge",
-                ngrams.len()
+        let dim = EMBEDDING_DIM;
+        if embedding.len() != NGRAM_COUNT * dim {
+            return Err(Error::Model(
+                "accentor.safetensors: unerwartete Embedding-Form".into(),
             ));
+        }
+        let mut ngrams = HashMap::with_capacity(NGRAM_COUNT);
+        let ngrams_path = dir.join("ngrams.txt");
+        let text = std::fs::read_to_string(&ngrams_path).map_err(io_at(ngrams_path))?;
+        for (id, gram) in text.lines().enumerate() {
+            if ngrams.insert(gram.to_string(), id as u32).is_some() {
+                return Err(Error::Model(format!(
+                    "ngrams.txt: doppeltes n-Gramm {gram:?} in Zeile {}",
+                    id + 1
+                )));
+            }
+        }
+        if ngrams.len() != NGRAM_COUNT {
+            return Err(Error::Model(format!(
+                "ngrams.txt: {} statt {NGRAM_COUNT} Einträge",
+                ngrams.len()
+            )));
         }
         let stress = vec![
             Linear::load(&tensors, "stress_clf.0", 64, 16)?,
@@ -119,23 +175,28 @@ impl Accentor {
             Linear::load(&tensors, "yo_clf.4", 64, 128)?,
             Linear::load(&tensors, "yo_clf.6", 7, 64)?,
         ];
-        let mut exceptions = HashMap::with_capacity(16_969);
-        let text = std::fs::read_to_string(dir.join("exceptions.tsv"))
-            .map_err(|e| format!("exceptions.tsv: {e}"))?;
-        for line in text.lines() {
+        let mut exceptions = HashMap::with_capacity(EXCEPTION_COUNT);
+        let exceptions_path = dir.join("exceptions.tsv");
+        let text = std::fs::read_to_string(&exceptions_path).map_err(io_at(exceptions_path))?;
+        for (line_no, line) in text.lines().enumerate() {
             let mut parts = line.split('\t');
             let word = parts.next().unwrap_or("");
             let stress = parts.next().and_then(|v| v.parse::<i32>().ok());
             let yo = parts.next().and_then(|v| v.parse::<i32>().ok());
-            if let (false, Some(stress), Some(yo)) = (word.is_empty(), stress, yo) {
-                exceptions.insert(word.to_string(), (stress, yo));
+            if let (false, Some(stress), Some(yo)) = (word.is_empty(), stress, yo)
+                && exceptions.insert(word.to_string(), (stress, yo)).is_some()
+            {
+                return Err(Error::Model(format!(
+                    "exceptions.tsv: doppeltes Wort {word:?} in Zeile {}",
+                    line_no + 1
+                )));
             }
         }
-        if exceptions.len() != 16_969 {
-            return Err(format!(
-                "exceptions.tsv: {} statt 16969 Einträge",
+        if exceptions.len() != EXCEPTION_COUNT {
+            return Err(Error::Model(format!(
+                "exceptions.tsv: {} statt {EXCEPTION_COUNT} Einträge",
                 exceptions.len()
-            ));
+            )));
         }
         Ok(Self {
             ngrams,
@@ -147,7 +208,8 @@ impl Accentor {
         })
     }
 
-    /// `word_ngrams(word, 1, len+3)` plus `UNK`, dann `embedding_bag(mean)`.
+    /// `word_ngrams(word, 1, len+3)`, dann `embedding_bag(mean)`. `UNK` wird nur
+    /// verwendet, wenn kein n-Gramm im Vokabular liegt.
     fn word_vector(&self, word: &[char]) -> Vec<f32> {
         let max_len = word.len() + 3;
         let mut wrapped = Vec::with_capacity(word.len() + 2);
@@ -155,13 +217,16 @@ impl Accentor {
         wrapped.extend_from_slice(word);
         wrapped.push('>');
         let mut ids = Vec::new();
+        // Ein Puffer für alle n-Gramme. `clear` behält die Kapazität.
+        let mut gram = String::new();
         for n in 1..=max_len {
             if n > wrapped.len() {
                 continue;
             }
             for start in 0..=wrapped.len() - n {
-                let gram: String = wrapped[start..start + n].iter().collect();
-                if let Some(id) = self.ngrams.get(&gram) {
+                gram.clear();
+                gram.extend(&wrapped[start..start + n]);
+                if let Some(id) = self.ngrams.get(gram.as_str()) {
                     ids.push(*id as usize);
                 }
             }
@@ -216,13 +281,11 @@ impl Accentor {
     pub fn accent(
         &self,
         sentence: &[char],
-        put_stress: bool,
-        put_yo: bool,
-        stress_single_vowel: bool,
+        options: AccentOptions,
         skip_stress_words: &HashSet<String>,
         skip_yo_words: &HashSet<String>,
     ) -> Vec<char> {
-        if !(put_stress || put_yo) {
+        if !(options.put_stress || options.put_yo) {
             return sentence.to_vec();
         }
         let tokens = self.tokenize(sentence);
@@ -248,9 +311,7 @@ impl Accentor {
                 token,
                 stress_logits,
                 yo_logits,
-                put_stress,
-                put_yo,
-                stress_single_vowel,
+                options,
                 skip_stress_words,
                 skip_yo_words,
             ));
@@ -258,24 +319,31 @@ impl Accentor {
         output.concat()
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn apply_word(
         &self,
         token: &Token,
         stress_logits: Vec<f32>,
         yo_logits: Vec<f32>,
-        put_stress: bool,
-        put_yo: bool,
-        stress_single_vowel: bool,
+        options: AccentOptions,
         skip_stress_words: &HashSet<String>,
         skip_yo_words: &HashSet<String>,
     ) -> Vec<char> {
+        let AccentOptions {
+            put_stress,
+            put_yo,
+            stress_single_vowel,
+        } = options;
         let (stress_probs, stress_pred) = softmax_argmax(&stress_logits);
         let (yo_probs, yo_pred) = softmax_argmax(&yo_logits);
         let clean_word: String = token.clean.iter().collect();
         let clean_yo = clean_word.replace('ё', "е");
         let mut raw_word = token.raw.clone();
-        let raw_lower: Vec<char> = raw_word.iter().flat_map(|ch| ch.to_lowercase()).collect();
+        // Zeichenweise Kleinschreibung: genau ein Zeichen je Eingabezeichen, damit die
+        // Indizes von `raw_lower` auch für `raw_word` gelten (`İ` wird sonst zu zwei Zeichen).
+        let raw_lower: Vec<char> = raw_word
+            .iter()
+            .map(|ch| ch.to_lowercase().next().unwrap_or(*ch))
+            .collect();
         let have_stress = raw_lower.contains(&'+');
         let have_yo = raw_lower.contains(&'ё');
 
@@ -380,8 +448,12 @@ impl Accentor {
                     .flat_map(|ch| ch.to_lowercase())
                     .filter(|ch| matches!(ch, 'а'..='я' | 'ё'))
                     .collect();
-                let stop =
-                    index == last && STOP_WORDS.contains(&part.iter().collect::<String>().as_str());
+                // Vergleich in Kleinschreibung. `prepare_text_input` schreibt die Eingabe
+                // bereits klein, daher ändert das für die Pipeline nichts.
+                let stop = index == last && {
+                    let lowered: String = part.iter().flat_map(|ch| ch.to_lowercase()).collect();
+                    STOP_WORDS.contains(&lowered.as_str())
+                };
                 tokens.push(Token {
                     raw,
                     process: !clean.is_empty() && !stop,
@@ -506,20 +578,22 @@ fn accentuate_exception(
 }
 
 /// Hilfsfunktion für Tests: derselbe Pfad wie `synthesize`, nur Text.
+///
+/// # Errors
+///
+/// Gibt [`Error::Input`] zurück, wenn der Text keine sprechbaren Zeichen enthält.
 pub fn accent_text(
     config: &Config,
     accentor: &Accentor,
     text: &str,
-) -> Result<(Vec<char>, Vec<char>), String> {
+) -> Result<(Vec<char>, Vec<char>)> {
     let prepared = prepare_text_input(config, text);
     if !prepared.has_text {
-        return Err("Text is empty".into());
+        return Err(Error::Input("text is empty".into()));
     }
     let accented = accentor.accent(
         &prepared.sentence,
-        true,
-        true,
-        true,
+        AccentOptions::default(),
         &HashSet::new(),
         &HashSet::new(),
     );

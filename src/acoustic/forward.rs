@@ -114,8 +114,8 @@ pub fn postprocess_durations(raw: &Tensor, durs_rate: f32) -> Result<Vec<u32>> {
         .map(|value| (value / durs_rate).round_ties_even())
         .collect();
     let len = dur.len();
-    if len < 4 {
-        candle_core::bail!("Sequenz zu kurz für die Dauer-Korrekturen");
+    if len < 3 {
+        candle_core::bail!("Sequenz zu kurz für die Dauer-Korrekturen: {len} < 3 Symbole");
     }
     if dur[0] > 5.0 {
         dur[0] = 5.0;
@@ -132,25 +132,20 @@ pub fn postprocess_durations(raw: &Tensor, durs_rate: f32) -> Result<Vec<u32>> {
 
 /// Bei Koeffizient 1.0 bleibt von `update_pitch_coef` nur die Nullung kleiner
 /// Werte; die Satzzeichen-Nullung des Originals ist toter Code.
+///
+/// Werte mit `|x| < 0.001` werden zu `0.0`. Alle anderen bleiben unverändert, auch `NaN`,
+/// weil der Vergleich dafür falsch ist.
+///
+/// # Errors
+///
+/// Gibt einen Fehler zurück, wenn ein Tensor-Operator fehlschlägt.
 pub fn update_pitch(pitch: &Tensor) -> Result<Tensor> {
-    let values = pitch.to_vec3::<f32>()?;
-    let mut mapped = Vec::with_capacity(values.len());
-    for batch in values {
-        let mut batch_out = Vec::with_capacity(batch.len());
-        for row in batch {
-            let mut row_out = Vec::with_capacity(row.len());
-            for value in row {
-                row_out.push(if value.abs() < 0.001 { 0.0 } else { value });
-            }
-            batch_out.push(row_out);
-        }
-        mapped.push(batch_out);
-    }
-    Tensor::new(mapped, pitch.device())
+    let small = pitch.abs()?.lt(0.001f32)?;
+    small.where_cond(&pitch.zeros_like()?, pitch)
 }
 
 pub struct Acoustic {
-    pub tacotron: Tacotron,
+    tacotron: Tacotron,
     pub predictors: Predictors,
     pub device: Device,
 }
@@ -202,5 +197,22 @@ impl Acoustic {
             decoder: out.decoder,
             mel: out.mel,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn three_tokens_are_postprocessed() -> Result<()> {
+        let raw = Tensor::from_vec(vec![7f32.ln(), 2f32.ln(), 30f32.ln()], (1, 3), &Device::Cpu)?;
+        let dur = postprocess_durations(&raw, 1.0)?;
+        assert_eq!(
+            dur,
+            vec![5, 13, 7],
+            "exp(raw) - 1 = [6, 1, 29] before the corrections"
+        );
+        Ok(())
     }
 }

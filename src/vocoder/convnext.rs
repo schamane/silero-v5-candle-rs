@@ -11,7 +11,9 @@ pub struct Backbone {
 }
 
 struct Block {
-    dw_weight: Tensor,
+    /// Die sieben Gewichtsspalten der depthwise Conv, je `[1, C, 1]`.
+    dw_taps: Vec<Tensor>,
+    /// Bias der depthwise Conv als `[1, C, 1]`.
     dw_bias: Tensor,
     norm: LayerNorm,
     pw1: Linear,
@@ -35,9 +37,10 @@ impl Backbone {
         let mut blocks = Vec::with_capacity(8);
         for index in 0..8 {
             let block = vb.pp(format!("convnext.{index}"));
+            let dw_weight = block.get((512, 1, 7), "dwconv.weight")?;
             blocks.push(Block {
-                dw_weight: block.get((512, 1, 7), "dwconv.weight")?,
-                dw_bias: block.get(512, "dwconv.bias")?,
+                dw_taps: depthwise_taps(&dw_weight)?,
+                dw_bias: block.get(512, "dwconv.bias")?.reshape((1, 512, 1))?,
                 norm: candle_nn::layer_norm(512, 1e-6, block.pp("norm"))?,
                 pw1: candle_nn::linear(512, 1536, block.pp("pwconv1"))?,
                 pw2: candle_nn::linear(1536, 512, block.pp("pwconv2"))?,
@@ -56,19 +59,19 @@ impl Backbone {
     /// Mel `[1, 192, T]` -> Features `[1, T, 512]`.
     pub fn forward(&self, mel: &Tensor) -> Result<Tensor> {
         let x = self.embed.forward(mel)?;
-        let x = self.norm.forward(&x.transpose(1, 2)?)?;
+        let x = self.norm.forward(&x.transpose(1, 2)?.contiguous()?)?;
         let mut x = x.transpose(1, 2)?;
         for block in &self.blocks {
             x = block.forward(&x)?;
         }
-        self.final_norm.forward(&x.transpose(1, 2)?)
+        self.final_norm.forward(&x.transpose(1, 2)?.contiguous()?)
     }
 }
 
 impl Block {
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        let y = depthwise(&self.dw_weight, &self.dw_bias, x)?;
-        let y = self.norm.forward(&y.transpose(1, 2)?)?;
+        let y = depthwise(&self.dw_taps, &self.dw_bias, x)?;
+        let y = self.norm.forward(&y.transpose(1, 2)?.contiguous()?)?;
         let y = self.pw1.forward(&y)?.gelu_erf()?;
         let y = self.pw2.forward(&y)?;
         let y = y.broadcast_mul(&self.gamma)?;
@@ -76,20 +79,28 @@ impl Block {
     }
 }
 
+/// Zerlegt das Gewicht `[C, 1, 7]` einmalig in sieben Spalten `[1, C, 1]`.
+fn depthwise_taps(weight: &Tensor) -> Result<Vec<Tensor>> {
+    let (channels, _, kernel) = weight.dims3()?;
+    (0..kernel)
+        .map(|tap| weight.narrow(2, tap, 1)?.reshape((1, channels, 1)))
+        .collect()
+}
+
 /// candle zerlegt `groups = 512` in 512 einzelne Convs; hier sieben
-/// verschobene Slices mal Gewichtsspalte.
-fn depthwise(weight: &Tensor, bias: &Tensor, x: &Tensor) -> Result<Tensor> {
+/// verschobene Slices mal Gewichtsspalte. Die Akkumulation startet mit dem
+/// ersten Produkt statt mit Nullen, das Ergebnis ist dasselbe.
+fn depthwise(taps: &[Tensor], bias: &Tensor, x: &Tensor) -> Result<Tensor> {
     let (_, channels, len) = x.dims3()?;
     let zeros = Tensor::zeros((1, channels, 3), x.dtype(), x.device())?;
     let padded = Tensor::cat(&[&zeros, x, &zeros], 2)?;
-    let mut out = Tensor::zeros((1, channels, len), x.dtype(), x.device())?;
-    for tap in 0..7 {
-        let slice = padded.narrow(2, tap, len)?;
-        let w = weight
-            .narrow(2, tap, 1)?
-            .squeeze(2)?
-            .reshape((1, channels, 1))?;
-        out = out.add(&slice.broadcast_mul(&w)?)?;
+    let (first, rest) = taps.split_first().ok_or_else(|| {
+        candle_core::Error::Msg("depthwise: keine Gewichtsspalten geladen".into())
+    })?;
+    let mut out = padded.narrow(2, 0, len)?.broadcast_mul(first)?;
+    for (offset, w) in rest.iter().enumerate() {
+        let slice = padded.narrow(2, offset + 1, len)?;
+        out = out.add(&slice.broadcast_mul(w)?)?;
     }
-    out.broadcast_add(&bias.reshape((1, channels, 1))?)
+    out.broadcast_add(bias)
 }
