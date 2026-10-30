@@ -1,0 +1,13 @@
+silero-v5-ru-candle-rs is a Rust port of Silero v5_ru.
+
+Original: Silero Models, https://github.com/snakers4/silero-models
+Copyright (c) Silero Team.
+Licensed under CC BY-NC-SA 4.0:
+https://creativecommons.org/licenses/by-nc-sa/4.0/
+
+Modifications: reimplementation in Rust on candle, CPU only, 48 kHz mono output.
+The model package v5_ru.pt is not distributed with this repository;
+scripts/export_silero.py derives the tensors locally from the package
+(sha256 7ba04d42340fe0398042eed2e0d12d62e23096d626b1b9feff4dcb1309197ab4).
+
+This project is not affiliated with or endorsed by Silero.
