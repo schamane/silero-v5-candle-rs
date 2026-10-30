@@ -7,19 +7,34 @@ use candle_nn::{Linear, Module, VarBuilder};
 use realfft::{ComplexToReal, RealFftPlanner};
 use rustfft::num_complex::Complex32;
 
+use crate::Error;
+
 /// Der ISTFT-Frame schreibt `n_fft` Samples und multipliziert sie mit dem
 /// Fenster der Länge `win_length`; beide müssen deshalb übereinstimmen.
-fn validate_fft(n_fft: usize, hop: usize, win: usize) -> Result<()> {
+///
+/// `pad = (win - hop) / 2` wird später als `y[pad..len - pad]` abgeschnitten.
+/// Bei `pad == 0` wäre der Schnitt leer, in Python `y[:, 0:-0]` dagegen
+/// ergäbe der Schnitt bei Rust alles. Deshalb ist `pad == 0` ein Fehler.
+fn validate_fft(n_fft: usize, hop: usize, win: usize) -> crate::Result<()> {
     if n_fft == 0 || !n_fft.is_multiple_of(2) {
-        candle_core::bail!("n_fft muss gerade und > 0 sein: {n_fft}");
+        return Err(Error::Model(format!(
+            "n_fft muss gerade und > 0 sein: {n_fft}"
+        )));
     }
     if win == 0 || hop == 0 || hop > win {
-        candle_core::bail!("hop_length/win_length unbrauchbar: {hop}/{win}");
+        return Err(Error::Model(format!(
+            "hop_length/win_length unbrauchbar: {hop}/{win}"
+        )));
     }
     if n_fft != win {
-        candle_core::bail!(
+        return Err(Error::Model(format!(
             "n_fft {n_fft} != win_length {win}: der ISTFT-Frame schreibt n_fft Samples"
-        );
+        )));
+    }
+    if (win - hop) / 2 == 0 {
+        return Err(Error::Model(format!(
+            "pad (win - hop) / 2 ist 0 bei hop_length {hop} / win_length {win}"
+        )));
     }
     Ok(())
 }
@@ -27,6 +42,7 @@ fn validate_fft(n_fft: usize, hop: usize, win: usize) -> Result<()> {
 pub struct Head {
     out: Linear,
     window: Vec<f32>,
+    irfft: Arc<dyn ComplexToReal<f32>>,
     n_fft: usize,
     hop: usize,
     win: usize,
@@ -34,19 +50,35 @@ pub struct Head {
 }
 
 impl Head {
+    /// Lädt den Ausgabe-Layer und plant die inverse FFT einmalig.
+    ///
+    /// # Errors
+    ///
+    /// Gibt einen Fehler zurück, wenn die FFT-Geometrie unbrauchbar ist, die
+    /// Fensterlänge nicht `win_length` entspricht oder der Layer nicht geladen
+    /// werden kann.
     pub fn load(
         vb: VarBuilder,
         window: Vec<f32>,
         n_fft: usize,
         hop: usize,
         win: usize,
-    ) -> Result<Self> {
+    ) -> crate::Result<Self> {
         validate_fft(n_fft, hop, win)?;
+        if window.len() != win {
+            return Err(Error::Model(format!(
+                "ISTFT-Fenster hat {} statt win_length {win} Werte",
+                window.len()
+            )));
+        }
         let bins = n_fft / 2 + 1;
-        let out = candle_nn::linear(512, 2 * bins, vb.pp("out"))?;
+        let out = candle_nn::linear(512, 2 * bins, vb.pp("out"))
+            .map_err(|error| Error::Model(format!("out: {error}")))?;
+        let irfft = RealFftPlanner::<f32>::new().plan_fft_inverse(n_fft);
         Ok(Self {
             out,
             window,
+            irfft,
             n_fft,
             hop,
             win,
@@ -79,40 +111,43 @@ impl Head {
         if frames == 0 {
             return Ok(Vec::new());
         }
-        let mag = mag.contiguous()?.to_vec3::<f32>()?;
-        let cos = cos.contiguous()?.to_vec3::<f32>()?;
-        let sin = sin.contiguous()?.to_vec3::<f32>()?;
-        let mag = &mag[0];
-        let cos = &cos[0];
-        let sin = &sin[0];
+        // Frame-major (`frame * bins + bin`): die Bin-Schleife liest zusammenhängend.
+        let mag = frame_major(mag)?;
+        let cos = frame_major(cos)?;
+        let sin = frame_major(sin)?;
 
-        let mut planner = RealFftPlanner::<f32>::new();
-        let irfft: Arc<dyn ComplexToReal<f32>> = planner.plan_fft_inverse(self.n_fft);
-        let mut input = irfft.make_input_vec();
-        let mut output = irfft.make_output_vec();
+        let mut input = self.irfft.make_input_vec();
+        let mut output = self.irfft.make_output_vec();
+        let mut scratch = self.irfft.make_scratch_vec();
 
         let out_len = (frames - 1) * self.hop + self.win;
         let mut audio = vec![0.0f32; out_len];
         let scale = 1.0 / self.n_fft as f32;
         for frame in 0..frames {
+            let base = frame * bins;
             for bin in 0..bins {
-                let real = mag[bin][frame] * cos[bin][frame];
-                let imag = mag[bin][frame] * sin[bin][frame];
-                input[bin] = Complex32::new(real, imag);
+                let magnitude = mag[base + bin];
+                input[bin] =
+                    Complex32::new(magnitude * cos[base + bin], magnitude * sin[base + bin]);
             }
             // `irfft` ignoriert DC- und Nyquist-Imaginärteil; explizit nullen
             // macht die Absicht sichtbar.
             input[0].im = 0.0;
             input[bins - 1].im = 0.0;
-            irfft
-                .process(&mut input, &mut output)
+            self.irfft
+                .process_with_scratch(&mut input, &mut output, &mut scratch)
                 .map_err(|error| candle_core::Error::Msg(format!("irfft: {error}")))?;
             let offset = frame * self.hop;
-            for (index, value) in output.iter().enumerate() {
-                audio[offset + index] += value * self.window[index] * scale;
+            for ((acc, value), weight) in audio[offset..offset + self.win]
+                .iter_mut()
+                .zip(&output)
+                .zip(&self.window)
+            {
+                *acc += value * weight * scale;
             }
         }
 
+        // Die Hülle hängt nur von der Frame-Zahl ab, nicht von den Bins: einmal pro Aufruf.
         let mut envelope = vec![0.0f32; out_len];
         for frame in 0..frames {
             let offset = frame * self.hop;
@@ -136,9 +171,21 @@ impl Head {
     }
 }
 
+/// Liest `[1, bins, frames]` als flachen Vektor in Reihenfolge `frame * bins + bin`.
+fn frame_major(spectrum: &Tensor) -> Result<Vec<f32>> {
+    spectrum
+        .transpose(1, 2)?
+        .contiguous()?
+        .flatten_all()?
+        .to_vec1::<f32>()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::validate_fft;
+    use candle_core::{DType, Device};
+    use candle_nn::VarBuilder;
+
+    use super::{Head, validate_fft};
 
     #[test]
     fn accepts_the_model_geometry() {
@@ -151,5 +198,24 @@ mod tests {
         assert!(validate_fft(2401, 600, 2401).is_err());
         assert!(validate_fft(2400, 2401, 2400).is_err());
         assert!(validate_fft(0, 0, 0).is_err());
+    }
+
+    #[test]
+    fn rejects_zero_padding() {
+        assert!(validate_fft(2400, 2400, 2400).is_err());
+        assert!(validate_fft(2400, 2399, 2400).is_err());
+    }
+
+    #[test]
+    fn rejects_window_length_mismatch() {
+        let vb = VarBuilder::zeros(DType::F32, &Device::Cpu);
+        let Err(error) = Head::load(vb, vec![0.0; 100], 2400, 600, 2400) else {
+            panic!("Fensterlänge 100 bei win_length 2400 wurde akzeptiert");
+        };
+        let message = error.to_string();
+        assert!(
+            message.contains("100") && message.contains("2400"),
+            "Meldung ohne beide Längen: {message}"
+        );
     }
 }

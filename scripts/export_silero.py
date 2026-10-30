@@ -3,7 +3,7 @@
 # requires-python = ">=3.12"
 # dependencies = ["torch", "numpy", "scipy", "safetensors", "soundfile"]
 # ///
-"""Export Silero v5_ru weights, dictionaries and golden tensors for silero-v5-ru-candle-rs.
+"""Export Silero v5_ru weights, dictionaries and golden tensors for silero-v5-candle-rs.
 
 Reads the packaged TorchScript model once, unpacks the quantized BERT embeddings
 exactly once (via one warm apply_tts), writes f32 safetensors plus the text
@@ -13,9 +13,8 @@ gitignored (CC BY-NC-SA 4.0, derived weights).
 """
 
 import hashlib
-import importlib.util
 import json
-import os
+import re
 import sys
 from pathlib import Path
 
@@ -41,6 +40,81 @@ def sha256(path: Path) -> str:
         for block in iter(lambda: handle.read(1 << 20), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+# Mirrors `silero_v5_candle::text::normalize::{split_chunks, has_cyrillic}`.
+CYRILLIC = re.compile("[а-яё]")  # after lower(), as `has_cyrillic`
+CHUNK_LIMIT = 400
+
+
+def _split_sentences(text: str) -> list[str]:
+    """`SENTENCE_SPLIT = (?<=[.!?…])\\s+|\\n+`, keeping the punctuation."""
+    chars = list(text)
+    pieces: list[str] = []
+    start = 0
+    i = 0
+    while i < len(chars):
+        if chars[i] in ".!?…":
+            j = i + 1
+            while j < len(chars) and chars[j].isspace():
+                j += 1
+            if j > i + 1:
+                pieces.append("".join(chars[start : i + 1]))
+                start = i = j
+                continue
+            i += 1
+        elif chars[i] == "\n":
+            j = i
+            while j < len(chars) and chars[j] == "\n":
+                j += 1
+            pieces.append("".join(chars[start:i]))
+            start = i = j
+        else:
+            i += 1
+    if start < len(chars):
+        pieces.append("".join(chars[start:]))
+    return pieces
+
+
+def _last_substring(chars: list[str], needle: str, limit: int) -> int:
+    """Last start index of `needle` that ends at or before `limit`; 0 if none."""
+    found = 0
+    if not needle or len(chars) < len(needle):
+        return found
+    wanted = list(needle)
+    for start in range(len(chars) - len(needle) + 1):
+        if start + len(needle) > limit:
+            break
+        if chars[start : start + len(needle)] == wanted:
+            found = start
+    return found
+
+
+def split_chunks(text: str, limit: int = CHUNK_LIMIT) -> list[str]:
+    limit = max(3, limit)
+    chunks: list[str] = []
+    for sentence in _split_sentences(text):
+        sentence = list(sentence.strip())
+        while len(sentence) > limit:
+            cut = max(
+                _last_substring(sentence, ", ", limit),
+                _last_substring(sentence, "; ", limit),
+                _last_substring(sentence, " — ", limit),
+            )
+            if cut < limit // 3:
+                cut = _last_substring(sentence, " ", limit)
+            if cut < limit // 3:
+                cut = limit
+            head = "".join(sentence[:cut]).strip()
+            if head:
+                chunks.append(head)
+            sentence = sentence[cut:]
+            while sentence and sentence[0] in " ,;":
+                sentence.pop(0)
+        tail = "".join(sentence).strip()
+        if tail:
+            chunks.append(tail)
+    return chunks
 
 
 def contiguous(tensor: torch.Tensor) -> torch.Tensor:
@@ -333,15 +407,10 @@ def main() -> None:
         for entry in texts:
             handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
-    # Chunking und Kyrillik-Filter direkt aus `say.py`, damit der Harness-Teil
-    # denselben Golden-Vergleich bekommt.
-    spec = importlib.util.spec_from_file_location("say", ROOT / "scripts/say.py")
-    say = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(say)
     chunks = []
     for index, line in enumerate(corpus):
-        split = say.split_chunks(line)
-        kept = [chunk for chunk in split if say.CYRILLIC.search(chunk.lower())]
+        split = split_chunks(line)
+        kept = [chunk for chunk in split if CYRILLIC.search(chunk.lower())]
         chunks.append({"id": index, "chunks": split, "kept": kept})
     (OUT / "golden/chunks.json").write_text(
         json.dumps(chunks, ensure_ascii=False, indent=0) + "\n", encoding="utf-8"

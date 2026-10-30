@@ -1,7 +1,7 @@
 [workspace]
 
 [package]
-name = "silero-v5-ru-candle-rs"
+name = "silero-v5-candle-rs"
 version = "0.1.0"
 edition = "2024"
 description = "Silero v5_ru TTS in Rust (candle)"
@@ -10,7 +10,7 @@ readme = "README.md"
 publish = false
 
 [lib]
-name = "silero_v5_ru_candle"
+name = "silero_v5_candle"
 path = "src/lib.rs"
 
 [[bin]]
@@ -25,3 +25,4 @@ realfft = "3.5"
 rustfft = "6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+thiserror = "2"
