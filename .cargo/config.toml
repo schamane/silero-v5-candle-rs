@@ -1,0 +1,4 @@
+# crates.io-Cooldown: Versionen, die jünger als drei Tage sind, werden von
+# `cargo update`/`cargo add` nicht gewählt. Schützt vor kurzlebigen Releases.
+[registry]
+global-min-publish-age = "3 days"

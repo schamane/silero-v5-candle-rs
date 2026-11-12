@@ -1,0 +1,6 @@
+# Clippy-Konfiguration für den gesamten Workspace.
+# Tests dürfen `unwrap`/`expect`/`print` nutzen; Assertions tragen ihre Werte
+# bereits im Makro (assert_eq!) oder in der Testzeile.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-print-in-tests = true

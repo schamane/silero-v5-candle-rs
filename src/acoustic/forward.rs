@@ -215,14 +215,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn three_tokens_are_postprocessed() -> Result<()> {
-        let raw = Tensor::from_vec(vec![7f32.ln(), 2f32.ln(), 30f32.ln()], (1, 3), &Device::Cpu)?;
-        let dur = postprocess_durations(&raw, 1.0)?;
+    fn three_tokens_are_postprocessed() {
+        let raw = Tensor::from_vec(vec![7f32.ln(), 2f32.ln(), 30f32.ln()], (1, 3), &Device::Cpu)
+            .expect("Tensor aus drei Werten");
+        let dur = postprocess_durations(&raw, 1.0).expect("Dauern werden nachbearbeitet");
         assert_eq!(
             dur,
             vec![5, 13, 7],
             "exp(raw) - 1 = [6, 1, 29] before the corrections"
         );
-        Ok(())
     }
 }

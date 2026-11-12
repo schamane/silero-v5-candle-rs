@@ -20,8 +20,8 @@ Not affiliated with or endorsed by Silero.
 
 ## Requirements
 
-- Rust 1.85+ (edition 2024)
-- `candle` 0.11, CPU backend
+- Rust 1.88+ (edition 2024, Let-Chains)
+- `candle` 0.11.1, CPU backend
 - Model files under `models/silero-v5-ru/`, `models/silero-v5-cis-ext/` and/or
   `models/silero-v5-cis-base-nostress/` (not in git, see below)
 
@@ -142,7 +142,7 @@ cargo test --release --test golden            # 34 sentences against the Python 
 cargo test --release --test golden_cis        # Ukrainian sentence against the Python reference
 cargo test --release --test golden_cis_nostress   # 2 CIS-base sentences with the Python accentor
 cargo test --release --test golden_accentor_uk    # Ukrainian accentor logits and sentences
-cargo clippy --all-targets -- -D warnings
+make lint-rust                                    # clippy, all targets, -D warnings
 ```
 
 Set `SILERO_REQUIRE_GOLDEN=1` to fail instead of skipping when the model is missing, and to make a debug build fail instead of skipping the golden test.

@@ -1,13 +1,36 @@
 [workspace]
 
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "warn"
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+# Robustheit: kein stiller Panic, kein blinder Clone, jede Unterdrückung begründet.
+unwrap_used = "warn"
+redundant_clone = "warn"
+clone_on_ref_ptr = "warn"
+missing_assert_message = "warn"
+allow_attributes = "warn"
+allow_attributes_without_reason = "warn"
+undocumented_unsafe_blocks = "warn"
+multiple_unsafe_ops_per_block = "warn"
+dbg_macro = "warn"
+todo = "warn"
+panic_in_result_fn = "warn"
+
 [package]
 name = "silero-v5-candle-rs"
 version = "0.1.0"
 edition = "2024"
+# Let-Chains (`if let ... && ...`) und Edition 2024 verlangen 1.88.
+rust-version = "1.88"
 description = "Silero v5 TTS in Rust (candle): v5_ru, v5_cis_ext and v5_cis_base_nostress"
 license = "CC-BY-NC-SA-4.0"
 readme = "README.md"
 publish = false
+
+[lints]
+workspace = true
 
 [lib]
 name = "silero_v5_candle"
