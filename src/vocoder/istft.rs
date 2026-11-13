@@ -41,7 +41,10 @@ fn validate_fft(n_fft: usize, hop: usize, win: usize) -> crate::Result<()> {
 
 pub struct Head {
     out: Linear,
-    window: Vec<f32>,
+    /// Fenster mal `1 / n_fft`; spart die Skalierung pro Sample.
+    window_scaled: Vec<f32>,
+    /// Fenster zum Quadrat; die Überlappungshülle summiert diese Werte.
+    window_squared: Vec<f32>,
     irfft: Arc<dyn ComplexToReal<f32>>,
     n_fft: usize,
     hop: usize,
@@ -75,9 +78,13 @@ impl Head {
         let out = candle_nn::linear(512, 2 * bins, vb.pp("out"))
             .map_err(|error| Error::Model(format!("out: {error}")))?;
         let irfft = RealFftPlanner::<f32>::new().plan_fft_inverse(n_fft);
+        let scale = 1.0 / n_fft as f32;
+        let window_scaled = window.iter().map(|value| value * scale).collect();
+        let window_squared = window.iter().map(|value| value * value).collect();
         Ok(Self {
             out,
-            window,
+            window_scaled,
+            window_squared,
             irfft,
             n_fft,
             hop,
@@ -122,7 +129,6 @@ impl Head {
 
         let out_len = (frames - 1) * self.hop + self.win;
         let mut audio = vec![0.0f32; out_len];
-        let scale = 1.0 / self.n_fft as f32;
         for frame in 0..frames {
             let base = frame * bins;
             for bin in 0..bins {
@@ -141,9 +147,9 @@ impl Head {
             for ((acc, value), weight) in audio[offset..offset + self.win]
                 .iter_mut()
                 .zip(&output)
-                .zip(&self.window)
+                .zip(&self.window_scaled)
             {
-                *acc += value * weight * scale;
+                *acc += value * weight;
             }
         }
 
@@ -151,21 +157,29 @@ impl Head {
         let mut envelope = vec![0.0f32; out_len];
         for frame in 0..frames {
             let offset = frame * self.hop;
-            for (index, value) in self.window.iter().enumerate() {
-                envelope[offset + index] += value * value;
+            for (slot, value) in envelope[offset..offset + self.win]
+                .iter_mut()
+                .zip(&self.window_squared)
+            {
+                *slot += value;
             }
         }
         let start = self.pad;
         let end = out_len - self.pad;
+        // Prüfung vor der Schleife: sie wäre sonst ein Verzweigungs- und
+        // Bounds-Check pro Sample und würde die Divisionsschleife bremsen.
+        if let Some(offset) = envelope[start..end]
+            .iter()
+            .position(|divisor| *divisor <= 1e-11)
+        {
+            return Err(candle_core::Error::Msg(format!(
+                "ISTFT-Fensterhülle bei Sample {} ist null",
+                start + offset
+            )));
+        }
         let mut samples = Vec::with_capacity(end - start);
-        for index in start..end {
-            let divisor = envelope[index];
-            if divisor <= 1e-11 {
-                return Err(candle_core::Error::Msg(format!(
-                    "ISTFT-Fensterhülle bei Sample {index} ist null"
-                )));
-            }
-            samples.push(audio[index] / divisor);
+        for (value, divisor) in audio[start..end].iter().zip(&envelope[start..end]) {
+            samples.push(value / divisor);
         }
         Ok(samples)
     }

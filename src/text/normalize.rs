@@ -133,10 +133,12 @@ pub fn split_chunks(text: &str, limit: usize) -> Vec<String> {
             if !head.is_empty() {
                 chunks.push(head.to_string());
             }
-            sentence = sentence[cut..].to_vec();
-            while matches!(sentence.first(), Some(' ' | ',' | ';')) {
-                sentence.remove(0);
-            }
+            // Trennzeichen am Chunk-Anfang gehören zum Schnitt, nicht zum Rest.
+            let skip = sentence[cut..]
+                .iter()
+                .position(|ch| !matches!(ch, ' ' | ',' | ';'))
+                .unwrap_or(sentence.len() - cut);
+            sentence.drain(..cut + skip);
         }
         let tail: String = sentence.iter().collect();
         let tail = tail.trim();

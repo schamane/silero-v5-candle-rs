@@ -167,7 +167,7 @@ impl Silero {
     /// Gibt [`Error::Input`] zurück, wenn der Text keine sprechbaren Zeichen enthält oder
     /// `voice` unbekannt ist, und [`Error::Pipeline`], wenn eine Stufe fehlschlägt.
     pub fn synthesize(&self, text: &str, voice: &str) -> Result<Vec<f32>> {
-        Ok(self.run_stages(text, voice)?.audio)
+        Ok(self.run_prepared(self.prepare(text), voice)?.audio)
     }
 
     /// Synthetisiert beliebig langen Text: zerlegt ihn in Chunks von höchstens
@@ -181,10 +181,11 @@ impl Silero {
     pub fn synthesize_text(&self, text: &str, voice: &str) -> Result<Vec<f32>> {
         let mut audio = Vec::new();
         for chunk in split_chunks(text, CHUNK_LIMIT) {
-            if !self.prepare(&chunk).has_text {
+            let prepared = self.prepare(&chunk);
+            if !prepared.has_text {
                 continue;
             }
-            audio.extend(self.synthesize(&chunk, voice)?);
+            audio.extend(self.run_prepared(prepared, voice)?.audio);
         }
         if audio.is_empty() {
             return Err(Error::Input("text is empty".into()));
@@ -192,9 +193,10 @@ impl Silero {
         Ok(audio)
     }
 
-    /// Die gemeinsame Pipeline für `synthesize` und die Golden-Tests.
-    fn run_stages(&self, text: &str, voice: &str) -> Result<Stages> {
-        let prepared = self.prepare(text);
+    /// Die gemeinsame Pipeline für `synthesize` und die Golden-Tests. Der Aufrufer
+    /// übergibt den bereits vorbereiteten Text, damit `synthesize_text` ihn pro Chunk
+    /// nur einmal erzeugt.
+    fn run_prepared(&self, prepared: PreparedText, voice: &str) -> Result<Stages> {
         if !prepared.has_text {
             return Err(Error::Input("text is empty".into()));
         }
@@ -252,7 +254,7 @@ impl Silero {
     /// Gibt dieselben Fehler wie [`Silero::synthesize`] zurück.
     #[doc(hidden)]
     pub fn debug_stages(&self, text: &str, voice: &str) -> Result<Stages> {
-        self.run_stages(text, voice)
+        self.run_prepared(self.prepare(text), voice)
     }
 
     /// Nur für die Golden-Tests (nicht Teil der stabilen API): Homosolver-Logits pro Homograph.

@@ -161,8 +161,25 @@ strings. `chunks_match_python` is a regression snapshot of
 
 ## Performance
 
-Apple M1, CPU, `--release`: RTF ≈ 0.033, first PCM after 0.09 s cold, peak RSS 452 MB
-(measured against the Python reference at 0.49 s / 1.96 s / 931 MB).
+Apple M1, CPU, `--release`: RTF 0.025–0.034 warm, first PCM after 0.09 s cold, peak RSS
+448 MB (measured against the Python reference at 0.49 s / 1.96 s / 931 MB). The spread
+comes from the CPU clock state; the per-stage shares are stable.
+
+Profile of one 4.94 s chunk (395 mel frames, median of 9 runs):
+
+| Stage | ms | Share |
+|---|---:|---:|
+| Backbone (ConvNeXt) | 91 | 62 % |
+| Acoustic (predictors, Tacotron, HourGlass) | 28 | 19 % |
+| Head (`lin` 512 → 2402) | 14 | 10 % |
+| ISTFT | 7.4 | 5 % |
+| Homosolver (BERT) | 4.7 | 3 % |
+| Accentor and text frontend | 0.3 | <1 % |
+
+Inside the backbone about 62 % are the GEMMs (`pwconv1`/`pwconv2`), 31 % are LayerNorm,
+layout copies and the seven-tap depthwise conv, 5 % are the embedding and
+`final_layer_norm`. The hand-written depthwise conv is roughly eleven times faster than
+`conv1d(groups = 512)`, because candle splits the groups into 512 separate convolutions.
 
 ## License
 
