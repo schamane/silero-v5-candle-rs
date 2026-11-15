@@ -37,6 +37,25 @@ fn accent_text_uses_dictionary_and_keeps_explicit_marks() {
         "Wörterbuch nicht angewandt: {accented:?}"
     );
 
+    let door = model
+        .accent_text(
+            "На двери висит большой замок, а ключ лежит на столе.",
+            "baya",
+        )
+        .expect("Betonung");
+    assert!(
+        door.contains("двер+и"),
+        "Präpositiv двер+и nicht gesetzt: {door:?}"
+    );
+
+    let door2 = model
+        .accent_text("На столе лежит мука, а на двери висит замок.", "baya")
+        .expect("Betonung");
+    assert!(
+        door2.contains("двер+и"),
+        "Präpositiv двер+и im zweiten Satz nicht gesetzt: {door2:?}"
+    );
+
     let explicit = model
         .accent_text("Прив+ет, как дела?", "baya")
         .expect("Betonung");

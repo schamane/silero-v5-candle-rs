@@ -141,6 +141,7 @@ impl HomoSolver {
         let mut result = sentence.to_vec();
         let mut offset: i32 = 0;
         for (found, pred) in matches.iter().zip(preds) {
+            let pred = self.context_override(sentence, found).unwrap_or(pred);
             let start = found.start as i32 + offset;
             let end = found.end as i32 + offset;
             let Some((replacement, stress_inserted)) =
@@ -156,6 +157,33 @@ impl HomoSolver {
             }
         }
         Ok(result)
+    }
+
+    /// Kontextregel für das lokative `двери`: nach `в`/`на`/`о`/`при` ist die
+    /// Endbetonung `двер+и` orthoepisch die Form des Präpositivs; `дв+ери` gilt in
+    /// Genitiv/Dativ. Der Homograph-Klassifikator sieht das Präpositionswort nicht
+    /// zuverlässig, deshalb entscheidet hier die Präposition.
+    fn context_override(&self, sentence: &[char], found: &Found) -> Option<u32> {
+        let key = found.word.iter().collect::<String>().to_lowercase();
+        if key != "двери" {
+            return None;
+        }
+        let previous = previous_word(sentence, found.start)?;
+        let previous: String = previous
+            .iter()
+            .map(|ch| ch.to_lowercase().next().unwrap_or(*ch))
+            .collect();
+        if !matches!(
+            previous.as_str(),
+            "в" | "во" | "на" | "о" | "об" | "обо" | "при"
+        ) {
+            return None;
+        }
+        self.homodict
+            .get("двери")?
+            .iter()
+            .position(|variant| variant == "двер+и")
+            .and_then(|index| u32::try_from(index).ok())
     }
 
     /// Ersatz für `found` nach Variante `pred` seines Wörterbucheintrags. Das Flag
@@ -352,6 +380,20 @@ fn values(tensor: &Tensor) -> Result<Vec<f32>> {
         .flatten_all()
         .and_then(|tensor| tensor.to_vec1::<f32>())
         .map_err(stage("homosolver"))
+}
+
+/// Das Wort direkt vor `start`, ohne dazwischenliegende Leerzeichen; `None`, wenn
+/// ein Satzzeichen oder der Satzanfang davor liegt.
+fn previous_word(sentence: &[char], start: usize) -> Option<Vec<char>> {
+    let mut end = start;
+    while end > 0 && sentence[end - 1].is_whitespace() {
+        end -= 1;
+    }
+    let mut begin = end;
+    while begin > 0 && is_pattern_char(sentence[begin - 1]) {
+        begin -= 1;
+    }
+    (begin < end).then(|| sentence[begin..end].to_vec())
 }
 
 fn build_marked(sentence: &[char], found: &Found) -> Vec<char> {

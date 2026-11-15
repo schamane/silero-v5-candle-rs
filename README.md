@@ -72,7 +72,9 @@ raises the Rust accentor from 331/335 to 335/335 and from 56/60 to 60/60 exact
 sentences. The source data is CC BY-SA 4.0; the file is not part of the repo.
 
 `Silero::accent_text(text, voice)` exposes the same stress stage without
-synthesizing audio, for A/B tests.
+synthesizing audio, for A/B tests. Context homographs are handled where the
+package's classifier is insufficient: `на двери` uses the prepositional
+`двер+и` (the genitive/dative `дв+ери` is kept after `у`/`к`).
 
 A separate 60-sentence hard-case suite (mobile stress, short forms, `-ся`,
 compounds, homographs, clitics; `stress_hard60.json` in the listening-page
