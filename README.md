@@ -26,6 +26,8 @@ Not affiliated with or endorsed by Silero.
 - `candle` 0.11.1 with the Metal or CPU backend. The `metal` feature is on by
   default and only compiles on Apple targets; elsewhere build with
   `--no-default-features` for the CPU-only variant.
+- Optional on macOS: Apple Accelerate via `--features accelerate` (CPU BLAS;
+  measured about 1.9× faster than candle's pure-Rust CPU GEMM on an M1).
 - Model files under `models/silero-v5-ru/`, `models/silero-v5-cis-ext/` and/or
   `models/silero-v5-cis-base-nostress/` (not in git, see below)
 
@@ -49,7 +51,18 @@ no second Metal instance and `Silero::load` reuses the probed device.
 `Silero::load_with_device(dir, &Device::Cpu)`
 forces a device, for example for CPU/Metal comparisons.
 
-Long text should use `Silero::synthesize_text`, which splits it into chunks of at most 400 characters and joins the audio without a pause.
+The CLI selects the backend with `--device auto|cpu|metal`. For the fastest CPU
+path on macOS, build without Metal and with Accelerate:
+
+```sh
+cargo build --release --no-default-features --features accelerate
+target/release/silero --device cpu --out out.wav "Привет, как дела?"
+```
+
+`auto` is `Silero::load` (Metal when usable, otherwise CPU); `metal` fails
+cleanly when no Metal device is available.
+
+Long text should use `Silero::synthesize_text`, which splits it into chunks of at most 400 characters and joins the audio without a pause. Chunks run in parallel on both CPU and Metal, up to `MAX_PARALLEL_CHUNKS` (8).
 
 Five voices: `aidar`, `baya`, `kseniya`, `xenia`, `eugene`. Plain text only: no SSML
 pauses, no `speaker="random"`.
@@ -183,21 +196,25 @@ uv run scripts/export_accentor_uk.py
 cargo test                                    # unit tests; goldens skip without the model
 cargo test --release --test golden            # 34 sentences against the Python reference
 cargo test --release --no-default-features --test golden   # same suite on the CPU
+cargo test --release --no-default-features --features accelerate --test golden
 cargo test --release --test golden_cis        # Ukrainian sentence against the Python reference
 cargo test --release --test golden_cis_nostress   # 2 CIS-base sentences with the Python accentor
 cargo test --release --test golden_accentor_uk    # Ukrainian accentor logits and sentences
 cargo test --release --test accent_dictionary      # optional stress_dict.tsv + accent_text
-make lint-rust                                    # clippy, default and CPU paths
-make check                                        # lint + release Metal/CPU tests
+make lint-rust                                    # clippy, default, CPU and Accelerate paths
+make check                                        # lint + release tests on Metal, CPU and Accelerate
 ```
 
-Set `SILERO_REQUIRE_GOLDEN=1` to fail instead of skipping when the model is missing, and to make a debug build fail instead of skipping the golden test. Golden tests run on the default device (Metal on macOS); `--no-default-features` pins the CPU path. Compare the two runs before changing tolerances.
+Set `SILERO_REQUIRE_GOLDEN=1` to fail instead of skipping when the model is missing, and to make a debug build fail instead of skipping the golden test. Golden tests run on the default device (Metal on macOS); `--no-default-features` pins the CPU path; `--features accelerate` runs the CPU path through Apple's BLAS. Compare the runs before changing tolerances.
 
 Golden tests compare token IDs exactly, per-stage tensors within 1e-4…5e-3 (shapes must
 match) and audio within 5e-3. On Metal, `backbone` uses 5e-3 (measured 3.7e-3) and `mag`
 2.5e-2 (measured 1.7e-2) because f32 GEMMs accumulate in a different order; all other
-bounds, including audio at 5e-3, are shared. Over the 10 s benchmark text, Metal and CPU
-audio differ by at most 4 int16 LSB (1.2e-4). The largest measured audio difference is 2.9e-3 (sentence 4,
+bounds, including audio at 5e-3, are shared. The Accelerate/MKL CPU path uses a
+`backbone` bound of 2e-3 (measured 1.43e-3) for the same reason; the CIS goldens
+already pass unchanged. Over the 10 s benchmark text, Metal and CPU audio differ
+by at most 4 int16 LSB (1.2e-4); Accelerate vs. pure CPU differs by at most 2.2e-3
+over the 34-sentence corpus. The largest measured audio difference is 2.9e-3 (sentence 4,
 aidar); sentence 33 is about 3.9e-5. Sentence 33 covers the padding path with two homographs
 of different BERT token counts. For `v5_cis_base_nostress`, the ConvNeXt and magnitude
 intermediates use scaled tolerances because a 1e-5 mel difference amplifies to ~5e-3; the
@@ -210,20 +227,42 @@ strings. `chunks_match_python` is a regression snapshot of
 
 ## Performance
 
-Apple M1, CPU, `--release`: the current parallel `synthesize_text` path reaches RTF
-0.017–0.028 (median 0.019, 5 warm runs) on the 7.89 s benchmark text; the earlier
-single-thread path was 0.025–0.034. Peak RSS is 448 MB. First PCM is 0.09 s cold.
+Apple M1 (8 Cores, 16 GiB), `--release`, `tests/corpus.txt` (34 Satz-Chunks,
+110,8 s Audio), Stimme `baya`, Median aus 5 Läufen. `MAX_PARALLEL_CHUNKS` ist 8;
+die Chunks laufen auf CPU und Metal parallel.
 
-Metal on the same M1: RTF 0.018 on the first Metal revision (`67cbc11`) and
-0.014–0.015 after the post-Metal changes (`f024297`), over the same 7.89 s text,
-6 warm runs each. The first Metal process pays about 11 s of shader compilation
-(4.5 s load, 6.9 s first chunk); later processes reuse the macOS shader cache and
-load in ~0.08 s. Warm Metal load is ~20 ms slower than CPU, so a single short CLI
-call is a wash; the gain appears when the load is amortized over several chunks.
-Sub-second chunks are dominated by per-op dispatch: measured RTF 0.034–0.051 on
-Metal vs 0.037–0.038 on CPU.
+| Backend | Chunk-Threads | Synthese | RTF | Speedup |
+|---|---:|---:|---:|---:|
+| Metal | 1 (sequenziell) | 1,563 s | 0,0141 | 1,00× |
+| Metal | 4 | 1,178 s | 0,0106 | 1,33× |
+| Metal | 8 | **1,160 s** | **0,0105** | **1,35×** |
+| CPU, pure Rust | 4 | 1,386 s | 0,0125 | 1,13× |
+| CPU, pure Rust | 8 | 1,205 s | 0,0109 | 1,30× |
+| CPU, Accelerate | 4 | 0,720 s | 0,0065 | 2,17× |
+| CPU, Accelerate | 8 | **0,697 s** | **0,0063** | **2,24×** |
 
-Generation comparison (same text, voice `baya`, warm, this machine):
+Ein einzelner 8,12-s-Chunk (dort greift keine Chunk-Parallelität):
+
+| Backend | Synthese | RTF |
+|---|---:|---:|
+| Metal | 0,107 s | 0,0132 |
+| CPU, pure Rust | 0,126 s | 0,0155 |
+| CPU, Accelerate | **0,065 s** | **0,0080** |
+
+Auf dieser Maschine ist CPU + Accelerate der schnellste Pfad; Metal gewinnt
+durch Chunk-Parallelität 26 %, bleibt aber hinter Accelerate. Der erste
+Metal-Prozess zahlt etwa 11 s Shader-Kompilierung (4,5 s Load, 6,9 s erster
+Chunk); spätere Prozesse nutzen den macOS-Shader-Cache und laden in ~0,25 s.
+CPU + Accelerate hat diesen Kaltstart nicht. Peak RSS liegt mit acht Chunks bei
+etwa 550 MB.
+
+Nach der Umsetzung über die CLI (`synthesize_text`, dieselben 34 Chunks, Median
+aus 5 Läufen): Metal 1,40 s (RTF 0,0127), CPU pure Rust 1,30 s (0,0118) und
+CPU + Accelerate 0,77 s (0,0070). Die Tabelle oben stammt aus dem separaten
+Chunk-Harness mit expliziten Thread-Zahlen.
+
+Die folgenden Zahlen sind historische Generationenvergleiche vor Accelerate und
+Chunk-Parallelität:
 
 | Generation | Commit | Device | Synth | RTF |
 |---|---|---|---:|---:|
@@ -231,7 +270,8 @@ Generation comparison (same text, voice `baya`, warm, this machine):
 | Metal implementation | `67cbc11` | Metal | 0.145 s | 0.018 |
 | Post-Metal | `f024297` | Metal | 0.110 s | 0.014 |
 
-Profile of one 4.94 s chunk (395 mel frames, median of 9 runs):
+Historisches Profil eines 4,94-s-Chunks (395 Mel-Frames, Median aus 9 Läufen, vor
+Accelerate und Chunk-Parallelität):
 
 | Stage | ms | Share |
 |---|---:|---:|

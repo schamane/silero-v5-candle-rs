@@ -4,12 +4,13 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Instant;
 
-use silero_v5_candle::{Error, Result, Silero, write_wav};
+use candle_core::Device;
+use silero_v5_candle::{Error, Result, Silero, default_device, write_wav};
 
 const DEFAULT_MODEL: &str = "models/silero-v5-ru";
 const DEFAULT_VOICE: &str = "baya";
 const USAGE: &str = "\
-usage: silero --out DATEI [--model VERZEICHNIS] [--voice NAME] [--] TEXT...
+usage: silero --out DATEI [--model VERZEICHNIS] [--voice NAME] [--device GERÄT] [--] TEXT...
 
 Synthetisiert TEXT zu einer WAV-Datei (16 Bit, 48 kHz, mono).
 
@@ -17,9 +18,19 @@ Optionen:
   --out DATEI           WAV-Datei, die geschrieben wird (Pflicht)
   --model VERZEICHNIS   Modellverzeichnis (Standard: models/silero-v5-ru)
   --voice NAME          Stimme, etwa baya (Standard: baya)
+  --device GERÄT        auto, cpu oder metal (Standard: auto)
   --help                diese Hilfe anzeigen
   --                    beendet die Optionen; danach darf TEXT mit -- beginnen
 ";
+
+/// Gerätewahl der CLI. `Auto` entspricht [`Silero::load`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum DeviceChoice {
+    #[default]
+    Auto,
+    Cpu,
+    Metal,
+}
 
 /// Was der Aufruf tun soll.
 enum Command {
@@ -32,6 +43,7 @@ struct Request {
     voice: String,
     out: PathBuf,
     text: String,
+    device: DeviceChoice,
 }
 
 fn main() -> ExitCode {
@@ -58,7 +70,19 @@ fn run() -> Result<()> {
         Command::Synthesize(request) => request,
     };
     let start = Instant::now();
-    let model = Silero::load(&request.dir)?;
+    let model = match request.device {
+        DeviceChoice::Auto => Silero::load(&request.dir)?,
+        DeviceChoice::Cpu => Silero::load_with_device(&request.dir, &Device::Cpu)?,
+        DeviceChoice::Metal => {
+            let device = default_device();
+            if !device.is_metal() {
+                return Err(Error::Input(
+                    "Metal ist auf diesem Gerät nicht verfügbar".into(),
+                ));
+            }
+            Silero::load_with_device(&request.dir, &device)?
+        }
+    };
     let sample_rate = model.sample_rate();
     let load = start.elapsed();
     let synth = Instant::now();
@@ -89,6 +113,7 @@ where
     let mut args = args.into_iter();
     let mut dir = PathBuf::from(DEFAULT_MODEL);
     let mut voice = DEFAULT_VOICE.to_string();
+    let mut device = DeviceChoice::Auto;
     let mut out = None;
     let mut words = Vec::new();
     while let Some(arg) = args.next() {
@@ -100,6 +125,7 @@ where
             }
             "--model" => dir = PathBuf::from(value(&mut args, "--model", "einen Pfad")?),
             "--voice" => voice = value(&mut args, "--voice", "einen Namen")?,
+            "--device" => device = parse_device(value(&mut args, "--device", "ein Gerät")?)?,
             "--out" => out = Some(PathBuf::from(value(&mut args, "--out", "einen Pfad")?)),
             flag if flag.starts_with("--") => {
                 return Err(Error::Input(format!("unbekannte Option {flag}")));
@@ -117,10 +143,63 @@ where
         voice,
         out,
         text,
+        device,
     }))
+}
+
+fn parse_device(value: String) -> Result<DeviceChoice> {
+    match value.as_str() {
+        "auto" => Ok(DeviceChoice::Auto),
+        "cpu" => Ok(DeviceChoice::Cpu),
+        "metal" => Ok(DeviceChoice::Metal),
+        other => Err(Error::Input(format!(
+            "unbekanntes Gerät {other}; erwartet auto, cpu oder metal"
+        ))),
+    }
 }
 
 fn value(args: &mut impl Iterator<Item = String>, flag: &str, what: &str) -> Result<String> {
     args.next()
         .ok_or_else(|| Error::Input(format!("{flag} braucht {what}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn request(args: &[&str]) -> Request {
+        let args = args.iter().map(|arg| (*arg).to_owned());
+        match parse_args(args).expect("Argumente werden gelesen") {
+            Command::Synthesize(request) => request,
+            Command::Help => panic!("Hilfe statt Synthese"),
+        }
+    }
+
+    #[test]
+    fn parses_device_choices() {
+        assert_eq!(
+            request(&["--out", "out.wav", "--device", "cpu", "Текст"]).device,
+            DeviceChoice::Cpu
+        );
+        assert_eq!(
+            request(&["--out", "out.wav", "--device", "metal", "Текст"]).device,
+            DeviceChoice::Metal
+        );
+        assert_eq!(
+            request(&["--out", "out.wav", "Текст"]).device,
+            DeviceChoice::Auto
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_device() {
+        assert!(matches!(
+            parse_args(
+                ["--out", "out.wav", "--device", "tpu", "Текст"]
+                    .map(str::to_owned)
+                    .into_iter()
+            ),
+            Err(Error::Input(_))
+        ));
+    }
 }

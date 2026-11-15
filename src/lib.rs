@@ -123,8 +123,12 @@ struct Accented<'s> {
     accented: Cow<'s, [char]>,
 }
 
-/// Obergrenze paralleler Chunks in [`Silero::synthesize_text`] auf der CPU.
-pub const MAX_PARALLEL_CHUNKS: usize = 4;
+/// Obergrenze paralleler Chunks in [`Silero::synthesize_text`], unabhängig vom Backend.
+///
+/// Auf der CPU bringt der Sprung von 4 auf 8 Threads rund 13 % (M1, 34 Chunks); auf
+/// Metal sättigt der Gewinn schon bei 4 Threads. Acht Chunks halten zusammen etwa
+/// 550 MB RSS, deshalb bleibt der Wert bewusst moderat.
+pub const MAX_PARALLEL_CHUNKS: usize = 8;
 
 /// Eigener Pool statt des globalen: Er begrenzt, wie viele Chunks gleichzeitig ihre
 /// Zwischentensoren halten (grob 25 MB je Chunk bei T=1767), und candles eigenes rayon
@@ -204,7 +208,8 @@ impl Silero {
     }
 
     /// Lädt das Modell auf ein explizit gewähltes Gerät, etwa `&Device::Cpu` für einen
-    /// Vergleich mit Metal oder für Umgebungen ohne Metal.
+    /// Vergleich mit Metal oder für Umgebungen ohne Metal. Akzentor und
+    /// Homograph-BERT laufen unabhängig davon auf der CPU.
     ///
     /// # Errors
     ///
@@ -252,7 +257,10 @@ impl Silero {
         let stress = match config.stress() {
             StressConfig::Ru { bert, tokenizer } => Some(StressModel::Ru {
                 accentor: Accentor::load(dir, with_dictionary)?,
-                homosolver: HomoSolver::load(dir, device, bert, tokenizer)?,
+                // Der Homograph-BERT ist klein und auf der CPU messbar schneller
+                // (1,9 ms/Zeile vs. 2,4 ms/Zeile auf Metal). Auf Metal spart das
+                // außerdem einen GPU-Sync vor der Akustik.
+                homosolver: HomoSolver::load(dir, &Device::Cpu, bert, tokenizer)?,
             }),
             StressConfig::Uk(_) => Some(StressModel::Uk(UkrainianAccentor::load(dir)?)),
             StressConfig::None => None,
@@ -367,8 +375,10 @@ impl Silero {
     /// Synthetisiert beliebig langen Text: zerlegt ihn in Chunks von höchstens
     /// [`CHUNK_LIMIT`] Codepoints und hängt die Audiodaten ohne Pausen aneinander.
     ///
-    /// Auf der CPU laufen mehrere Chunks parallel (höchstens [`MAX_PARALLEL_CHUNKS`]
-    /// Threads); auf Metal nacheinander. Das Ergebnis ist in beiden Fällen
+    /// Auf CPU und Metal laufen mehrere Chunks parallel (höchstens
+    /// [`MAX_PARALLEL_CHUNKS`] Threads). Auf Metal sind die GPU-Kernel in der
+    /// Command-Queue weiterhin FIFO; der Gewinn kommt aus überlappender Host-Arbeit
+    /// und dem Füllen von Dispatch-Lücken. Das Ergebnis ist in beiden Fällen
     /// bitgleich zu [`Silero::synthesize_chunks`], aneinandergehängt.
     ///
     /// # Errors
@@ -383,7 +393,7 @@ impl Silero {
         if chunks.is_empty() {
             return Err(Error::Input("text is empty".into()));
         }
-        let parallel = chunks.len() > 1 && matches!(self.device, Device::Cpu);
+        let parallel = chunks.len() > 1;
         let pool = if parallel { chunk_pool() } else { None };
         let parts: Vec<Vec<f32>> = match pool {
             Some(pool) => pool.install(|| {

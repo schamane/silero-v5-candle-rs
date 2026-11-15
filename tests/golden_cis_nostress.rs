@@ -125,12 +125,7 @@ fn compare(name: &str, actual: &Tensor, expected: &Tensor, tolerance: f32) {
     eprintln!("{name}: max {max:.3e}");
 }
 
-// BLAS-Backends (accelerate/mkl) sind opt-in und nicht golden-abgedeckt.
 #[test]
-#[cfg_attr(
-    any(feature = "accelerate", feature = "mkl"),
-    ignore = "BLAS-Rundung weicht von den Python-Goldens ab"
-)]
 fn ukrainian_nostress_golden_matches_python() {
     if cfg!(debug_assertions) {
         if require_golden() {

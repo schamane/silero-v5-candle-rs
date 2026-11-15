@@ -128,10 +128,20 @@ impl Head {
         if frames == 0 {
             return Ok(Vec::new());
         }
-        // Frame-major (`frame * bins + bin`): die Bin-Schleife liest zusammenhängend.
-        let mag = flat(&spectrum.mag)?;
-        let cos = flat(&spectrum.cos)?;
-        let sin = flat(&spectrum.sin)?;
+        // Ein gemeinsamer Readback statt drei: `to_vec` committet und wartet auf den
+        // eigenen Command-Buffer; auf Metal kostet jeder Wait ca. 1-2 ms. Die drei
+        // Tensoren sind frame-major, deshalb liegen nach dem Cat die Kanäle
+        // `mag`, `cos`, `sin` je Frame hintereinander.
+        let joined = Tensor::cat(&[&spectrum.mag, &spectrum.cos, &spectrum.sin], 2)?;
+        let (_, joined_frames, joined_bins) = joined.dims3()?;
+        let stride = 3 * bins;
+        if joined_frames != frames || joined_bins != stride {
+            return Err(candle_core::Error::Msg(format!(
+                "ISTFT: gepacktes Spektrum {:?} statt [{frames}, {stride}]",
+                joined.dims()
+            )));
+        }
+        let data = flat(&joined)?;
 
         let mut input = self.irfft.make_input_vec();
         let mut output = self.irfft.make_output_vec();
@@ -140,11 +150,13 @@ impl Head {
         let out_len = (frames - 1) * self.hop + self.win;
         let mut audio = vec![0.0f32; out_len];
         for frame in 0..frames {
-            let base = frame * bins;
+            let base = frame * stride;
             for bin in 0..bins {
-                let magnitude = mag[base + bin];
-                input[bin] =
-                    Complex32::new(magnitude * cos[base + bin], magnitude * sin[base + bin]);
+                let magnitude = data[base + bin];
+                input[bin] = Complex32::new(
+                    magnitude * data[base + bins + bin],
+                    magnitude * data[base + 2 * bins + bin],
+                );
             }
             // `irfft` ignoriert DC- und Nyquist-Imaginärteil; explizit nullen
             // macht die Absicht sichtbar.
@@ -195,7 +207,8 @@ impl Head {
     }
 }
 
-/// Liest `[1, frames, bins]` als flachen Vektor in Reihenfolge `frame * bins + bin`.
+/// Liest `[1, frames, 3 * bins]` als flachen Vektor in Reihenfolge
+/// `frame * 3 * bins + channel * bins + bin`.
 fn flat(spectrum: &Tensor) -> Result<Vec<f32>> {
     spectrum.flatten_all()?.to_vec1::<f32>()
 }

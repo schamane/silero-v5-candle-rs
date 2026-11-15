@@ -1,0 +1,558 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Silero v5 — Backend-Hörtest</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f4f2ee;
+    --surface: #ffffff;
+    --surface-2: #eae7e1;
+    --fg: #1d1b18;
+    --muted: #6b655d;
+    --border: #d8d3ca;
+    --accent: #1f6feb;
+    --accent-soft: #e4edff;
+    --ok: #1a7f4b;
+    --warn: #9a5b00;
+    --radius: 14px;
+    --shadow: 0 1px 2px rgb(0 0 0 / 0.06), 0 8px 24px rgb(0 0 0 / 0.05);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #15140f;
+      --surface: #201e19;
+      --surface-2: #2a2721;
+      --fg: #f0ece4;
+      --muted: #a8a093;
+      --border: #3a362e;
+      --accent: #7aa7ff;
+      --accent-soft: #1b2a45;
+      --ok: #79d69d;
+      --warn: #f0b35a;
+      --shadow: 0 1px 2px rgb(0 0 0 / 0.35), 0 8px 24px rgb(0 0 0 / 0.25);
+    }
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font: 16px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  main {
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 32px 20px 80px;
+  }
+  header h1 {
+    margin: 0 0 6px;
+    font-size: clamp(1.6rem, 3vw, 2.2rem);
+    letter-spacing: -0.02em;
+  }
+  header p { margin: 0; color: var(--muted); max-width: 70ch; }
+  .panel {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+  }
+  .intro {
+    margin: 24px 0 28px;
+    padding: 18px 20px;
+  }
+  .intro h2 { margin: 0 0 8px; font-size: 1rem; }
+  .intro ul { margin: 8px 0 0; padding-left: 1.2em; color: var(--muted); }
+  .intro li + li { margin-top: 4px; }
+  .toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: center;
+    margin: 0 0 20px;
+  }
+  button {
+    font: inherit;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--fg);
+    border-radius: 9px;
+    padding: 8px 13px;
+    cursor: pointer;
+  }
+  button:hover { background: var(--surface-2); }
+  button.primary {
+    border-color: transparent;
+    background: var(--accent);
+    color: #fff;
+    font-weight: 600;
+  }
+  button.primary:hover { filter: brightness(1.06); }
+  button:disabled { opacity: 0.5; cursor: default; }
+  .trial {
+    margin: 0 0 22px;
+    padding: 18px 18px 16px;
+  }
+  .trial-head {
+    display: flex;
+    gap: 12px;
+    align-items: baseline;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    margin-bottom: 12px;
+  }
+  .trial h2 {
+    margin: 0;
+    font-size: 1.02rem;
+    font-weight: 650;
+  }
+  .trial .text {
+    margin: 0 0 14px;
+    color: var(--muted);
+    font-size: 0.98rem;
+  }
+  .samples {
+    display: grid;
+    gap: 10px;
+  }
+  .sample {
+    display: grid;
+    grid-template-columns: 2.2rem minmax(0, 1fr);
+    gap: 10px;
+    align-items: center;
+    background: var(--surface-2);
+    border-radius: 10px;
+    padding: 8px 10px;
+  }
+  .sample .label {
+    display: grid;
+    place-items: center;
+    width: 2.1rem;
+    height: 2.1rem;
+    border-radius: 50%;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    font-weight: 700;
+  }
+  .sample audio {
+    width: 100%;
+    height: 40px;
+  }
+  .sample .missing {
+    grid-column: 2;
+    color: var(--warn);
+    font-size: 0.88rem;
+  }
+  .trial-controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px 18px;
+    align-items: center;
+    margin-top: 14px;
+  }
+  .trial-controls .group {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+  }
+  .trial-controls .group > span {
+    color: var(--muted);
+    font-size: 0.9rem;
+  }
+  .choice {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 5px 9px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: var(--surface);
+    cursor: pointer;
+    font-size: 0.9rem;
+  }
+  .choice input { margin: 0; accent-color: var(--accent); }
+  .choice:hover { background: var(--accent-soft); }
+  textarea {
+    width: 100%;
+    min-height: 54px;
+    resize: vertical;
+    font: inherit;
+    color: var(--fg);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 9px;
+    padding: 8px 10px;
+  }
+  .mapping {
+    display: none;
+    margin-top: 12px;
+    padding: 9px 12px;
+    border-left: 3px solid var(--accent);
+    background: var(--accent-soft);
+    border-radius: 0 8px 8px 0;
+    font-size: 0.92rem;
+  }
+  .mapping.visible { display: block; }
+  .mapping strong { font-weight: 650; }
+  .status {
+    min-height: 1.4em;
+    color: var(--muted);
+    font-size: 0.9rem;
+  }
+  .footer {
+    margin-top: 28px;
+    color: var(--muted);
+    font-size: 0.86rem;
+  }
+  code {
+    background: var(--surface-2);
+    border-radius: 4px;
+    padding: 1px 5px;
+    font-size: 0.9em;
+  }
+  @media (max-width: 520px) {
+    main { padding: 22px 12px 60px; }
+    .sample { grid-template-columns: 1.9rem minmax(0, 1fr); }
+    .sample .label { width: 1.8rem; height: 1.8rem; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Silero v5 — Backend-Hörtest</h1>
+    <p>Derselbe Text, dieselbe Stimme, drei Backends. Die Reihenfolge ist pro Durchgang zufällig und blind, bis du auflöst.</p>
+  </header>
+
+  <section class="intro panel">
+    <h2>So funktioniert's</h2>
+    <ul>
+      <li>Kopfhörer oder gute Lautsprecher, einmal eingestellte Lautstärke nicht verändern.</li>
+      <li>Pro Zeile A/B/C anhören. Die Dateien unterscheiden sich nur im Rechenpfad, nicht im Modell.</li>
+      <li>„Auflösen“ zeigt die Zuordnung. „Ergebnis exportieren“ lädt deine Auswahl als JSON.</li>
+      <li>Die Unterschiede sind bei diesem Modell klein; ein Test auf „hörbar besser“ ist kein Beweis für Messwerte.</li>
+    </ul>
+  </section>
+
+  <div class="toolbar">
+    <button class="primary" id="reveal-all" type="button">Alle auflösen</button>
+    <button id="reset" type="button">Zurücksetzen</button>
+    <button id="export" type="button">Ergebnis exportieren</button>
+    <span class="status" id="status" role="status" aria-live="polite"></span>
+  </div>
+
+  <div id="trials"></div>
+
+  <p class="footer">
+    Dateien: <code>listening/audio/*.wav</code> (48 kHz, 16 Bit, mono). Sie sind lokal erzeugt und wegen
+    <code>*.wav</code> nicht im Git-Index. Ohne Dateien zeigt der Browser bei den Playern einen Fehler.
+  </p>
+</main>
+
+<script>
+(() => {
+  "use strict";
+
+  const TRIALS = [
+    {
+      id: "t01",
+      text: "Привет, как дела?",
+      files: { metal: "audio/t01-metal.wav", cpu: "audio/t01-cpu.wav", accel: "audio/t01-accel.wav" }
+    },
+    {
+      id: "t02",
+      text: "Замок стоит на холме, а рядом течёт река.",
+      files: { metal: "audio/t02-metal.wav", cpu: "audio/t02-cpu.wav", accel: "audio/t02-accel.wav" }
+    },
+    {
+      id: "t03",
+      text: "Я купил муку и испёк хлеб.",
+      files: { metal: "audio/t03-metal.wav", cpu: "audio/t03-cpu.wav", accel: "audio/t03-accel.wav" }
+    },
+    {
+      id: "t04",
+      text: "Все пришли вовремя, но всё равно опоздали.",
+      files: { metal: "audio/t04-metal.wav", cpu: "audio/t04-cpu.wav", accel: "audio/t04-accel.wav" }
+    },
+    {
+      id: "t05",
+      text: "Сегодня хорошая погода, и мы гуляем по парку.",
+      files: { metal: "audio/t05-metal.wav", cpu: "audio/t05-cpu.wav", accel: "audio/t05-accel.wav" }
+    }
+  ];
+
+  const BACKENDS = ["metal", "cpu", "accel"];
+  const BACKEND_LABEL = {
+    metal: "Metal",
+    cpu: "CPU (pure Rust)",
+    accel: "CPU + Accelerate"
+  };
+  const LETTERS = ["A", "B", "C"];
+  const STORAGE_KEY = "silero-backend-listening-v1";
+
+  const status = document.getElementById("status");
+  const trialsRoot = document.getElementById("trials");
+  const state = loadState();
+
+  function randomOrder() {
+    const order = BACKENDS.slice();
+    for (let i = order.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [order[i], order[j]] = [order[j], order[i]];
+    }
+    return order;
+  }
+
+  function loadState() {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY) || "null");
+      if (parsed && typeof parsed === "object" && parsed.trials) return parsed;
+    } catch (_) {
+      // Ignorieren: ein kaputter Eintrag darf die Seite nicht blockieren.
+    }
+    return { trials: {}, created: new Date().toISOString() };
+  }
+
+  function saveState() {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    } catch (_) {
+      // Privater Modus o. Ä.: Export funktioniert weiterhin.
+    }
+  }
+
+  function trialState(id) {
+    if (!state.trials[id]) {
+      state.trials[id] = { order: randomOrder(), choice: "", note: "", revealed: false };
+    }
+    return state.trials[id];
+  }
+
+  function labelFor(trial, letter) {
+    const backend = trialState(trial.id).order[LETTERS.indexOf(letter)];
+    return BACKEND_LABEL[backend] || backend;
+  }
+
+  function buildTrial(trial, index) {
+    const ts = trialState(trial.id);
+    const card = document.createElement("section");
+    card.className = "trial panel";
+    card.dataset.id = trial.id;
+
+    const head = document.createElement("div");
+    head.className = "trial-head";
+    const title = document.createElement("h2");
+    title.textContent = `Durchgang ${index + 1}`;
+    const badge = document.createElement("span");
+    badge.className = "status";
+    badge.textContent = `${trial.id.toUpperCase()} · 3 Backends`;
+    head.append(title, badge);
+
+    const text = document.createElement("p");
+    text.className = "text";
+    text.lang = "ru";
+    text.textContent = trial.text;
+
+    const samples = document.createElement("div");
+    samples.className = "samples";
+
+    LETTERS.forEach((letter) => {
+      const backend = ts.order[LETTERS.indexOf(letter)];
+      const row = document.createElement("div");
+      row.className = "sample";
+
+      const label = document.createElement("span");
+      label.className = "label";
+      label.textContent = letter;
+
+      const audio = document.createElement("audio");
+      audio.controls = true;
+      audio.preload = "metadata";
+      audio.src = trial.files[backend];
+      audio.dataset.backend = backend;
+      audio.setAttribute("aria-label", `Durchgang ${index + 1}, Probe ${letter}`);
+
+      const missing = document.createElement("span");
+      missing.className = "missing";
+      missing.hidden = true;
+      missing.textContent = `Datei fehlt: ${trial.files[backend]}`;
+      audio.addEventListener("error", () => {
+        missing.hidden = false;
+        audio.hidden = true;
+      });
+
+      row.append(label, audio, missing);
+      samples.append(row);
+    });
+
+    const controls = document.createElement("div");
+    controls.className = "trial-controls";
+
+    const choiceGroup = document.createElement("div");
+    choiceGroup.className = "group";
+    const choiceLabel = document.createElement("span");
+    choiceLabel.textContent = "Klingt am natürlichsten:";
+    choiceGroup.append(choiceLabel);
+
+    ["A", "B", "C", "keine"].forEach((value) => {
+      const wrap = document.createElement("label");
+      wrap.className = "choice";
+      const input = document.createElement("input");
+      input.type = "radio";
+      input.name = `choice-${trial.id}`;
+      input.value = value;
+      input.checked = ts.choice === value;
+      input.addEventListener("change", () => {
+        ts.choice = value;
+        saveState();
+      });
+      wrap.append(input, document.createTextNode(value));
+      choiceGroup.append(wrap);
+    });
+
+    const playAll = document.createElement("button");
+    playAll.type = "button";
+    playAll.textContent = "A → B → C";
+    playAll.addEventListener("click", () => playSequentially(card, playAll));
+
+    const reveal = document.createElement("button");
+    reveal.type = "button";
+    reveal.textContent = "Auflösen";
+    reveal.addEventListener("click", () => {
+      ts.revealed = true;
+      saveState();
+      renderMapping(card, trial, ts);
+      reveal.disabled = true;
+    });
+
+    controls.append(choiceGroup, playAll, reveal);
+
+    const mapping = document.createElement("div");
+    mapping.className = "mapping";
+    if (ts.revealed) {
+      renderMapping(card, trial, ts);
+      reveal.disabled = true;
+    }
+
+    const note = document.createElement("textarea");
+    note.placeholder = "Notiz (optional): Auffälligkeiten, Rauschen, Betonung …";
+    note.value = ts.note || "";
+    note.addEventListener("input", () => {
+      ts.note = note.value;
+      saveState();
+    });
+
+    card.append(head, text, samples, controls, mapping, note);
+    return card;
+  }
+
+  function renderMapping(card, trial, ts) {
+    const mapping = card.querySelector(".mapping");
+    if (!mapping) return;
+    mapping.replaceChildren();
+    const strong = document.createElement("strong");
+    strong.textContent = "Zuordnung: ";
+    mapping.append(strong);
+    LETTERS.forEach((letter, i) => {
+      const backend = ts.order[i];
+      const part = document.createElement("span");
+      part.textContent = `${letter} = ${BACKEND_LABEL[backend]}${i < 2 ? " · " : ""}`;
+      mapping.append(part);
+    });
+    mapping.classList.add("visible");
+  }
+
+  async function playSequentially(card, button) {
+    const audios = [...card.querySelectorAll("audio")].filter((a) => !a.hidden);
+    if (!audios.length) return;
+    button.disabled = true;
+    const previous = audios.map((a) => a.currentTime);
+    try {
+      for (const audio of audios) {
+        await new Promise((resolve) => {
+          const done = () => {
+            audio.removeEventListener("ended", done);
+            audio.removeEventListener("error", done);
+            resolve();
+          };
+          audio.addEventListener("ended", done);
+          audio.addEventListener("error", done);
+          audio.currentTime = 0;
+          const started = audio.play();
+          if (started && typeof started.catch === "function") started.catch(done);
+        });
+      }
+    } finally {
+      audios.forEach((audio, i) => { audio.currentTime = previous[i] || 0; });
+      button.disabled = false;
+    }
+  }
+
+  function render() {
+    trialsRoot.replaceChildren();
+    TRIALS.forEach((trial, index) => {
+      trialsRoot.append(buildTrial(trial, index));
+    });
+    status.textContent = "";
+  }
+
+  document.getElementById("reveal-all").addEventListener("click", () => {
+    TRIALS.forEach((trial) => {
+      const ts = trialState(trial.id);
+      ts.revealed = true;
+      const card = trialsRoot.querySelector(`[data-id="${trial.id}"]`);
+      if (card) renderMapping(card, trial, ts);
+      const button = card?.querySelector("button:last-of-type");
+      if (button) button.disabled = true;
+    });
+    saveState();
+    status.textContent = "Alle Zuordnungen sichtbar.";
+  });
+
+  document.getElementById("reset").addEventListener("click", () => {
+    if (!confirm("Alle Auswahlen, Notizen und Zuordnungen zurücksetzen?")) return;
+    state.trials = {};
+    state.created = new Date().toISOString();
+    saveState();
+    render();
+    status.textContent = "Zurückgesetzt.";
+  });
+
+  document.getElementById("export").addEventListener("click", () => {
+    const payload = {
+      created: state.created,
+      exported: new Date().toISOString(),
+      userAgent: navigator.userAgent,
+      trials: TRIALS.map((trial) => {
+        const ts = trialState(trial.id);
+        return {
+          id: trial.id,
+          text: trial.text,
+          choice: ts.choice || null,
+          note: ts.note || "",
+          revealed: Boolean(ts.revealed),
+          mapping: Object.fromEntries(
+            LETTERS.map((letter, i) => [letter, ts.order[i]])
+          )
+        };
+      })
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "silero-backend-listening.json";
+    link.click();
+    URL.revokeObjectURL(url);
+    status.textContent = "JSON exportiert.";
+  });
+
+  render();
+})();
+</script>
+</body>
+</html>

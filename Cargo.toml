@@ -34,7 +34,7 @@ default = ["metal"]
 # Apple-GPU-Backend. Ohne dieses Feature (oder ohne Metal-Gerät) rechnet alles auf der CPU.
 metal = ["candle-core/metal", "candle-nn/metal", "candle-transformers/metal"]
 # Optionale BLAS-Backends für die CPU (Apple Accelerate bzw. Intel MKL); nicht Standard.
-# Opt-in und nicht durch die Python-Goldens abgedeckt (BLAS-Rundung weicht ab).
+# Opt-in. Die Golden-Tests decken die BLAS-Rundung mit einer eigenen backbone-Toleranz ab.
 accelerate = ["candle-core/accelerate", "candle-nn/accelerate", "candle-transformers/accelerate"]
 mkl = ["candle-core/mkl", "candle-nn/mkl", "candle-transformers/mkl"]
 

@@ -96,8 +96,16 @@ fn compare_relative(name: &str, actual: &Tensor, expected: &Tensor, tolerance: f
 /// Metal akkumuliert GEMMs in anderer Reihenfolge. Über alle 34 Sätze gemessen:
 /// `backbone` 3.7e-3 statt 8.6e-4 auf der CPU, `mag` 1.7e-2 statt 4.8e-3.
 /// Die Grenzen für `cos`/`sin` (5e-3) und Audio (5e-3) gelten für beide Geräte.
+/// BLAS-Backends (Accelerate/MKL) summieren ebenfalls anders: gemessen 1.43e-3
+/// auf `backbone`, deshalb eine eigene Grenze statt eines ignorierten Tests.
 fn backbone_tolerance(device: &Device) -> f32 {
-    if device.is_metal() { 5e-3 } else { 1e-3 }
+    if device.is_metal() {
+        5e-3
+    } else if cfg!(any(feature = "accelerate", feature = "mkl")) {
+        2e-3
+    } else {
+        1e-3
+    }
 }
 
 /// Relativer Zuschlag für `backbone` und `mag`, deckt die BLAS-Summationsreihenfolge (gemessen 1.7e-4).
@@ -187,12 +195,7 @@ fn check_stages(
     }
 }
 
-// BLAS-Backends (accelerate/mkl) sind opt-in und nicht golden-abgedeckt.
 #[test]
-#[cfg_attr(
-    any(feature = "accelerate", feature = "mkl"),
-    ignore = "BLAS-Rundung weicht von den Python-Goldens ab"
-)]
 fn goldens_match_python() {
     if cfg!(debug_assertions) {
         if require_golden() {
