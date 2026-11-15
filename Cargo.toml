@@ -20,7 +20,7 @@ panic_in_result_fn = "warn"
 
 [package]
 name = "silero-v5-candle-rs"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 # Let-Chains (`if let ... && ...`) und Edition 2024 verlangen 1.88.
 rust-version = "1.88"
