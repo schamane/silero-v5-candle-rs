@@ -6,6 +6,7 @@ use std::path::Path;
 
 use crate::error::io_at;
 use crate::text::ngram::{Linear, NgramEmbedding, run_mlp, softmax_argmax};
+use crate::text::stress_dict::StressDictionary;
 use crate::text::tokens::{Token, hyphen_parts, lower_chars, ordinal_positions};
 use crate::{Error, Result};
 
@@ -53,6 +54,8 @@ pub(crate) struct Accentor {
     stress: Vec<Linear>,
     yo: Vec<Linear>,
     exceptions: HashMap<String, (i32, i32)>,
+    /// Optionales Wörterbuch aus `stress_dict.tsv`; fehlt es, bleibt das Modell allein.
+    dictionary: Option<StressDictionary>,
 }
 
 impl Accentor {
@@ -66,7 +69,7 @@ impl Accentor {
     /// Gibt [`Error::Io`] zurück, wenn eine Datei nicht gelesen werden kann, und sonst
     /// [`Error::Model`], wenn eine Datei fehlt, eine Form oder Anzahl nicht passt oder ein
     /// n-Gramm beziehungsweise Ausnahmewort doppelt vorkommt.
-    pub(crate) fn load(dir: &Path) -> Result<Self> {
+    pub(crate) fn load(dir: &Path, with_dictionary: bool) -> Result<Self> {
         let path = dir.join("accentor.safetensors");
         let tensors = candle_core::safetensors::load(&path, &candle_core::Device::Cpu)
             .map_err(|e| Error::model(path.display().to_string(), e))?;
@@ -118,6 +121,11 @@ impl Accentor {
             stress,
             yo,
             exceptions,
+            dictionary: if with_dictionary {
+                StressDictionary::load(dir)?
+            } else {
+                None
+            },
         })
     }
 
@@ -178,6 +186,15 @@ impl Accentor {
         if let Some((exc_stress, exc_yo)) = self.exceptions.get(&clean_word) {
             let have_stress = word.have_stress();
             return accentuate_exception(&word.raw, *exc_stress, *exc_yo, have_stress);
+        }
+        if !word.have_stress()
+            && let Some(stress) = self
+                .dictionary
+                .as_ref()
+                .and_then(|dictionary| dictionary.stress(&clean_word))
+        {
+            let stress = i32::try_from(stress).unwrap_or(i32::MAX);
+            return accentuate_exception(&word.raw, stress, -1, false);
         }
         word.predicted(stress_logits, yo_logits, options)
     }

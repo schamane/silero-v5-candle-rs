@@ -12,8 +12,9 @@ The crate is a port of the Silero TorchScript pipeline and owns all of it:
 
 - text frontend: normalization, symbol mapping, chunk splitting;
 - `HomoSolver` and Russian accentor (`v5_ru`): rubert-tiny2-shaped BERT plus
-  n-gram stress/`ё` heads and the exception list; Ukrainian n-gram accentor for
-  `v5_cis_base_nostress` and, if bundled, `v5_cis_ext`;
+  n-gram stress/`ё` heads, the exception list and an optional Wiktionary stress
+  dictionary; Ukrainian n-gram accentor for `v5_cis_base_nostress` and, if
+  bundled, `v5_cis_ext`;
 - acoustic model: duration/pitch predictors, encoder, LengthRegulator, HourGlass;
 - vocoder: ConvNeXt backbone, ISTFT head.
 
@@ -52,6 +53,34 @@ Long text should use `Silero::synthesize_text`, which splits it into chunks of a
 
 Five voices: `aidar`, `baya`, `kseniya`, `xenia`, `eugene`. Plain text only: no SSML
 pauses, no `speaker="random"`.
+
+### Optional stress dictionary
+
+`v5_ru` already ships a 16,969-entry `exceptions.tsv`. For broader coverage, the
+RU accentor also reads an optional `models/silero-v5-ru/stress_dict.tsv`
+(`word<TAB>position`, lowercase, 1-based stressed character, sorted by word). Generate it
+from the public [Wiktionary-derived list](https://github.com/eugenysilin/russian-ukrainian-stress-data):
+
+```sh
+uv run scripts/export_stress_dict.py /tmp/stress-data/ru-stress-dict.gz \
+    models/silero-v5-ru/stress_dict.tsv
+```
+
+The dictionary takes precedence over the n-gram heads but not over the package's
+`exceptions.tsv` or explicit `+` marks. On the 60-sentence stress benchmark it
+raises the Rust accentor from 331/335 to 335/335 and from 56/60 to 60/60 exact
+sentences. The source data is CC BY-SA 4.0; the file is not part of the repo.
+
+`Silero::accent_text(text, voice)` exposes the same stress stage without
+synthesizing audio, for A/B tests.
+
+A separate 60-sentence hard-case suite (mobile stress, short forms, `-ся`,
+compounds, homographs, clitics; `stress_hard60.json` in the listening-page
+directory) scores 58/60 with the dictionary. The two remaining failures are
+context homographs (`права` after a copula, plural `стены` before `были`); they
+are tracked as A-148 in `SPEC-STE.md`. A separate Ukrainian hard-case suite
+(`stress_hard60_uk.json`, `ukr_igor`, 15 categories) scores 45/60; it exposes the
+missing dictionary/homograph layer of the Ukrainian n-gram accentor (A-149).
 
 A small CLI writes a WAV:
 
@@ -118,7 +147,8 @@ The weights are **not** distributed here. They derive from the Silero v5_ru pack
 which is licensed CC BY-NC-SA 4.0. `scripts/export_silero.py` reads the package from
 the torch-hub cache (SHA-256 `7ba04d42…97ab4`), dequantises the BERT embeddings once
 and writes f32 safetensors plus golden tensors to `models/silero-v5-ru/` (~298 MB).
-Run it once with `uv run scripts/export_silero.py`.
+Run it once with `uv run scripts/export_silero.py`. An optional
+`stress_dict.tsv` (see above) can be added afterwards.
 
 For Ukrainian, `scripts/export_silero_cis.py` reads `v5_cis_ext.pt`
 (SHA-256 `e8185323…06eed2`) and writes `models/silero-v5-cis-ext/` (~97 MB with
@@ -154,7 +184,9 @@ cargo test --release --no-default-features --test golden   # same suite on the C
 cargo test --release --test golden_cis        # Ukrainian sentence against the Python reference
 cargo test --release --test golden_cis_nostress   # 2 CIS-base sentences with the Python accentor
 cargo test --release --test golden_accentor_uk    # Ukrainian accentor logits and sentences
-make lint-rust                                    # clippy, all targets, -D warnings
+cargo test --release --test accent_dictionary      # optional stress_dict.tsv + accent_text
+make lint-rust                                    # clippy, default and CPU paths
+make check                                        # lint + release Metal/CPU tests
 ```
 
 Set `SILERO_REQUIRE_GOLDEN=1` to fail instead of skipping when the model is missing, and to make a debug build fail instead of skipping the golden test. Golden tests run on the default device (Metal on macOS); `--no-default-features` pins the CPU path. Compare the two runs before changing tolerances.
@@ -176,16 +208,26 @@ strings. `chunks_match_python` is a regression snapshot of
 
 ## Performance
 
-Apple M1, CPU, `--release`: RTF 0.025–0.034 warm, first PCM after 0.09 s cold, peak RSS
-448 MB (measured against the Python reference at 0.49 s / 1.96 s / 931 MB). The spread
-comes from the CPU clock state; the per-stage shares are stable.
+Apple M1, CPU, `--release`: the current parallel `synthesize_text` path reaches RTF
+0.017–0.028 (median 0.019, 5 warm runs) on the 7.89 s benchmark text; the earlier
+single-thread path was 0.025–0.034. Peak RSS is 448 MB. First PCM is 0.09 s cold.
 
-Metal on the same M1: RTF 0.019–0.022 warm for a 10.05 s text, CPU 0.026 for the same
-text. The first Metal process pays about 11 s of shader compilation (4.5 s load, 6.9 s
-first chunk); later processes reuse the macOS shader cache and load in ~0.08 s. Warm
-Metal load is ~20 ms slower than CPU, so a single short CLI call is a wash; the gain
-appears when the load is amortized over several chunks. Sub-second chunks are dominated
-by per-op dispatch: measured RTF 0.034–0.051 on Metal vs 0.037–0.038 on CPU.
+Metal on the same M1: RTF 0.018 on the first Metal revision (`67cbc11`) and
+0.014–0.015 after the post-Metal changes (`f024297`), over the same 7.89 s text,
+6 warm runs each. The first Metal process pays about 11 s of shader compilation
+(4.5 s load, 6.9 s first chunk); later processes reuse the macOS shader cache and
+load in ~0.08 s. Warm Metal load is ~20 ms slower than CPU, so a single short CLI
+call is a wash; the gain appears when the load is amortized over several chunks.
+Sub-second chunks are dominated by per-op dispatch: measured RTF 0.034–0.051 on
+Metal vs 0.037–0.038 on CPU.
+
+Generation comparison (same text, voice `baya`, warm, this machine):
+
+| Generation | Commit | Device | Synth | RTF |
+|---|---|---|---:|---:|
+| CPU-only, whole text | `3317ffc` | CPU | 0.270 s | 0.033 |
+| Metal implementation | `67cbc11` | Metal | 0.145 s | 0.018 |
+| Post-Metal | `f024297` | Metal | 0.110 s | 0.014 |
 
 Profile of one 4.94 s chunk (395 mel frames, median of 9 runs):
 
@@ -198,11 +240,12 @@ Profile of one 4.94 s chunk (395 mel frames, median of 9 runs):
 | Homosolver (BERT) | 4.7 | 3 % |
 | Accentor and text frontend | 0.3 | <1 % |
 
-Inside the backbone about 62 % are the GEMMs (`pwconv1`/`pwconv2`). The exact GELU (erf)
-was about 31 %; it now has a parallel CPU path (a polynomial erf approximation, other
-devices keep `gelu_erf`). LayerNorm, layout copies and the depthwise conv together are
-about 4 %; the layout stays NTC. The hand-written depthwise conv is roughly eleven times
-faster than `conv1d(groups = 512)`, because candle splits the groups into 512 separate
+Inside the backbone about 62 % are the GEMMs (`pwconv1`/`pwconv2`). GELU (erf) was
+about 31 %; the CPU path now uses a parallel polynomial approximation (max error
+<1e-6, covered by `gelu_matches_gelu_erf_on_cpu`), other devices keep `gelu_erf`.
+LayerNorm, layout copies and the depthwise conv together are about 4 %; the layout
+stays NTC. The hand-written depthwise conv is roughly eleven times faster than
+`conv1d(groups = 512)`, because candle splits the groups into 512 separate
 convolutions.
 
 ## License
@@ -217,3 +260,4 @@ The crate source is CC BY-NC-SA 4.0, inherited from the Silero v5_ru package. Se
 | `v5_cis_ext` weights | CC BY-NC |
 | `v5_cis_base_nostress` weights | MIT |
 | Ukrainian accentor (`silero-stress`) | MIT |
+| optional `stress_dict.tsv` | CC BY-SA 4.0 (Wiktionary-derived) |

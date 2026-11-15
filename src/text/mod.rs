@@ -4,4 +4,5 @@ pub(crate) mod bert_tokenizer;
 pub(crate) mod homosolver;
 mod ngram;
 pub(crate) mod normalize;
+pub(crate) mod stress_dict;
 mod tokens;

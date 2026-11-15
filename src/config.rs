@@ -238,6 +238,12 @@ impl Config {
             }
         };
         let Some(accentor) = self.accentor.take() else {
+            if russian.is_some() && !char_ids.contains_key(&'+') {
+                return Err(Error::model_msg(format!(
+                    "{}: Akzentor braucht '+' im Symbolalphabet",
+                    path.display()
+                )));
+            }
             return Ok(
                 russian.map_or(StressConfig::None, |(bert, tokenizer)| StressConfig::Ru {
                     bert,
@@ -411,6 +417,66 @@ mod tests {
             .expect_err("doppelte ID muss abgelehnt werden")
             .to_string();
         assert!(err.contains("doppelte Symbol-ID 1"), "Fehler: {err}");
+    }
+
+    fn russian_config() -> Config {
+        serde_json::from_value(serde_json::json!({
+            "symbols": "аб+",
+            "symbol_to_id": {"а": 0, "б": 1, "+": 2},
+            "speakers": {"baya": 0},
+            "sample_rate": 48_000,
+            "n_fft": 16,
+            "hop_length": 4,
+            "win_length": 16,
+            "max_positions": 5000,
+            "bert": {
+                "vocab_size": 10,
+                "hidden_size": 4,
+                "num_hidden_layers": 1,
+                "num_attention_heads": 1,
+                "intermediate_size": 8,
+                "hidden_act": "gelu",
+                "hidden_dropout_prob": 0.1,
+                "max_position_embeddings": 16,
+                "type_vocab_size": 2,
+                "initializer_range": 0.02,
+                "layer_norm_eps": 1e-12,
+                "pad_token_id": 0,
+                "position_embedding_type": "absolute",
+                "use_cache": true,
+                "classifier_dropout": null,
+                "model_type": "bert"
+            },
+            "tokenizer": {
+                "never_split": [],
+                "unk_token_id": 0,
+                "sep_token_id": 1,
+                "pad_token_id": 0,
+                "cls_token_id": 2,
+                "homo_start_id": 3,
+                "homo_end_id": 4
+            }
+        }))
+        .expect("Minimalkonfiguration")
+    }
+
+    #[test]
+    fn russian_stress_requires_plus_symbol() {
+        let mut config = russian_config();
+        let error = config
+            .take_stress(Path::new("config.json"), &HashMap::new())
+            .expect_err("russischer Akzentor ohne '+' muss scheitern")
+            .to_string();
+        assert!(error.contains("'+'"), "Fehler: {error}");
+
+        let mut config = russian_config();
+        let mut symbols = HashMap::new();
+        symbols.insert('+', 2);
+        assert!(
+            config
+                .take_stress(Path::new("config.json"), &symbols)
+                .is_ok()
+        );
     }
 
     #[test]

@@ -40,7 +40,7 @@ fn load_model() -> Option<Silero> {
         ));
         return None;
     }
-    Some(Silero::load(&dir).expect("Modell lädt"))
+    Some(Silero::load_reference(&dir).expect("Modell lädt"))
 }
 
 fn golden(path: &Path) -> HashMap<String, Tensor> {

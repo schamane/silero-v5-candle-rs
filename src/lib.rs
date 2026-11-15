@@ -37,6 +37,9 @@ pub use text::accentor_uk::{StressOptions, UkrainianAccentor};
 pub use text::normalize::{has_cyrillic, split_chunks};
 pub use wav::write_wav;
 
+#[cfg(all(feature = "accelerate", feature = "mkl"))]
+compile_error!("accelerate and mkl are mutually exclusive; build one CPU backend at a time");
+
 // Nur für die Golden-Tests (opt-in über das Feature `test-util`, nicht Teil der stabilen API).
 #[cfg(feature = "test-util")]
 pub use acoustic::forward::AcousticOutput;
@@ -197,7 +200,7 @@ impl Silero {
     /// Gibt [`Error::Io`] zurück, wenn eine Datei nicht gelesen werden kann, und
     /// [`Error::Model`], wenn eine Datei fehlt, ungültig ist oder nicht zur Architektur passt.
     pub fn load(dir: &Path) -> Result<Self> {
-        Self::load_with_device(dir, &default_device())
+        Self::load_impl(dir, &default_device(), true)
     }
 
     /// Lädt das Modell auf ein explizit gewähltes Gerät, etwa `&Device::Cpu` für einen
@@ -208,6 +211,17 @@ impl Silero {
     /// Gibt dieselben Fehler wie [`Silero::load`] zurück; ein fehlschlagender
     /// Geräte-Operator erscheint als [`Error::Model`] oder [`Error::Pipeline`].
     pub fn load_with_device(dir: &Path, device: &Device) -> Result<Self> {
+        Self::load_impl(dir, device, true)
+    }
+
+    /// Wie [`Silero::load`], aber ohne `stress_dict.tsv`. Nur für die Golden-Tests:
+    /// die Python-Referenz kennt das optionale Wörterbuch nicht.
+    #[cfg(feature = "test-util")]
+    pub fn load_reference(dir: &Path) -> Result<Self> {
+        Self::load_impl(dir, &default_device(), false)
+    }
+
+    fn load_impl(dir: &Path, device: &Device, with_dictionary: bool) -> Result<Self> {
         let config = Config::load(&dir.join("config.json"))?;
 
         let weights = dir.join("acoustic.safetensors");
@@ -237,7 +251,7 @@ impl Silero {
         .map_err(|e| Error::model("vocoder.head", e))?;
         let stress = match config.stress() {
             StressConfig::Ru { bert, tokenizer } => Some(StressModel::Ru {
-                accentor: Accentor::load(dir)?,
+                accentor: Accentor::load(dir, with_dictionary)?,
                 homosolver: HomoSolver::load(dir, device, bert, tokenizer)?,
             }),
             StressConfig::Uk(_) => Some(StressModel::Uk(UkrainianAccentor::load(dir)?)),
@@ -291,6 +305,27 @@ impl Silero {
         self.voices
             .binary_search_by(|name| name.as_str().cmp(voice))
             .is_ok()
+    }
+
+    /// Betont einen Chunk ohne Synthese: Homograph-Löser, Ausnahmen und optionales
+    /// `stress_dict.tsv` aus dem Modellverzeichnis, danach der Akzentor. Die Stimme
+    /// entscheidet nur, ob ein paketgebundener ukrainischer Akzentor läuft.
+    ///
+    /// Für längeren Text zuerst mit [`split_chunks`] teilen; die Betonung ist wie bei
+    /// [`Silero::synthesize_text`] chunkweise.
+    ///
+    /// # Errors
+    ///
+    /// Gibt [`Error::Input`] zurück, wenn der Text keine sprechbaren Zeichen enthält oder
+    /// `voice` unbekannt ist, und [`Error::Pipeline`], wenn der Homograph-Löser fehlschlägt.
+    pub fn accent_text(&self, text: &str, voice: &str) -> Result<String> {
+        let prepared = self.prepare_text(text);
+        if !prepared.has_text {
+            return Err(Error::Input("text is empty".into()));
+        }
+        let voice = self.resolve_voice(voice)?;
+        let accented = self.accent(&prepared.sentence, voice)?;
+        Ok(accented.accented.iter().collect())
     }
 
     /// `apply_tts` für einen Chunk; Satzteilung und Pausen liegen beim Aufrufer.
