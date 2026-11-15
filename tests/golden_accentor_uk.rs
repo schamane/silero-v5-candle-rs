@@ -37,7 +37,7 @@ fn load_accentor() -> Option<UkrainianAccentor> {
         ));
         return None;
     }
-    Some(UkrainianAccentor::load(&dir, &Device::Cpu).expect("Akzentor lädt"))
+    Some(UkrainianAccentor::load(&dir).expect("Akzentor lädt"))
 }
 
 fn values(tensor: &candle_core::Tensor) -> Vec<f32> {

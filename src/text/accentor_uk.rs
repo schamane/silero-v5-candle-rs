@@ -6,8 +6,6 @@
 
 use std::path::Path;
 
-use candle_core::Device;
-
 use crate::text::ngram::{Linear, NgramEmbedding, run_mlp, softmax_argmax};
 use crate::{Error, Result};
 
@@ -52,13 +50,16 @@ pub struct UkrainianAccentor {
 impl UkrainianAccentor {
     /// Lädt `accentor.safetensors` und `ngrams.txt` aus `dir`.
     ///
+    /// Die Gewichte bleiben auf der CPU: der Akzentor rechnet in reinem Rust mit
+    /// `Vec<f32>`; ein Laden auf die GPU wäre nur ein zusätzlicher Kopierweg.
+    ///
     /// # Errors
     ///
     /// Gibt [`Error::Io`] zurück, wenn eine Datei nicht gelesen werden kann, und
     /// [`Error::Model`], wenn Formen, Anzahl oder Schichtkette nicht passen.
-    pub fn load(dir: &Path, device: &Device) -> Result<Self> {
+    pub fn load(dir: &Path) -> Result<Self> {
         let path = dir.join("accentor.safetensors");
-        let tensors = candle_core::safetensors::load(&path, device)
+        let tensors = candle_core::safetensors::load(&path, &candle_core::Device::Cpu)
             .map_err(|error| Error::Model(format!("{}: {error}", path.display())))?;
         let ngrams_path = dir.join("ngrams.txt");
         let embedding = NgramEmbedding::load(

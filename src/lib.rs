@@ -31,6 +31,34 @@ pub const SAMPLE_RATE: u32 = 48_000;
 /// (`split_chunks(text, 400)`) und hält Text unter den Positionsgrenzen von BERT und Akustik.
 pub const CHUNK_LIMIT: usize = 400;
 
+/// Rechengerät für [`Silero::load`]: Metal, wenn der Backend-Start und ein kleiner
+/// GEMM gelingen, sonst CPU. Mit `--no-default-features` gibt es kein Metal.
+#[cfg(feature = "metal")]
+fn default_device() -> Device {
+    // candle indiziert `MTLCopyAllDevices()`; ohne Metal-Gerät panikt der Konstruktor,
+    // statt `Err` zu liefern. Eine Panik heißt hier "kein Metal".
+    let metal = std::panic::catch_unwind(|| Device::new_metal(0).ok())
+        .ok()
+        .flatten();
+    metal
+        .filter(|device| metal_probe(device).is_ok())
+        .unwrap_or(Device::Cpu)
+}
+
+#[cfg(not(feature = "metal"))]
+fn default_device() -> Device {
+    Device::Cpu
+}
+
+/// Prüft Rechnen und Rücktransfer auf `device`. `Device::new_metal` meldet auch dann
+/// Erfolg, wenn der erste Kernel scheitert.
+#[cfg(feature = "metal")]
+fn metal_probe(device: &Device) -> candle_core::Result<()> {
+    let square = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (2, 2), device)?;
+    square.matmul(&square)?.to_vec2::<f32>()?;
+    Ok(())
+}
+
 /// Betonungsmodell eines Pakets; die Variante macht ungültige Kombinationen
 /// unrepräsentierbar. Ein Modell hält genau eine Instanz; Boxen spart hier nichts.
 #[expect(
@@ -58,38 +86,55 @@ pub struct Silero {
 }
 
 impl Silero {
-    /// Lädt Konfiguration, Gewichte und Wörterbücher aus `dir`.
+    /// Lädt Konfiguration, Gewichte und Wörterbücher aus `dir` auf das schnellste
+    /// verfügbare Gerät: Metal, wenn der Probelauf gelingt, sonst CPU.
+    ///
+    /// Welches Gerät gewählt wurde, sagt [`Silero::device`].
     ///
     /// # Errors
     ///
     /// Gibt [`Error::Io`] zurück, wenn eine Datei nicht gelesen werden kann, und
     /// [`Error::Model`], wenn eine Datei fehlt, ungültig ist oder nicht zur Architektur passt.
     pub fn load(dir: &Path) -> Result<Self> {
+        Self::load_with_device(dir, &default_device())
+    }
+
+    /// Lädt das Modell auf ein explizit gewähltes Gerät, etwa `&Device::Cpu` für einen
+    /// Vergleich mit Metal oder für Umgebungen ohne Metal.
+    ///
+    /// # Errors
+    ///
+    /// Gibt dieselben Fehler wie [`Silero::load`] zurück; ein fehlschlagender
+    /// Geräte-Operator erscheint als [`Error::Model`] oder [`Error::Pipeline`].
+    pub fn load_with_device(dir: &Path, device: &Device) -> Result<Self> {
         let config = Config::load(&dir.join("config.json"))?;
-        let device = Device::Cpu;
+
         let weights = dir.join("acoustic.safetensors");
         // SAFETY: Die Modelldateien in `dir` dürfen während des Mappings nicht geändert
         // oder ersetzt werden. Sonst ist der Inhalt des gemappten Speichers undefiniert.
         let vb = unsafe {
-            VarBuilder::from_mmaped_safetensors(std::slice::from_ref(&weights), DType::F32, &device)
+            VarBuilder::from_mmaped_safetensors(std::slice::from_ref(&weights), DType::F32, device)
                 .map_err(|e| Error::Model(format!("{}: {e}", weights.display())))?
         };
         let acoustic = Acoustic::load(
             vb.clone(),
-            &device,
+            device,
             config.symbol_count(),
             config.speaker_count(),
         )
         .map_err(|e| Error::Model(format!("acoustic: {e}")))?;
         let backbone = Backbone::load(vb.pp("vocoder.backbone"))
             .map_err(|e| Error::Model(format!("vocoder: {e}")))?;
-        let window = candle_core::safetensors::load(dir.join("istft_window.safetensors"), &device)
-            .map_err(|e| Error::Model(format!("istft_window.safetensors: {e}")))?
-            .remove("window")
-            .ok_or_else(|| Error::Model("istft_window.safetensors: window fehlt".into()))?
-            .flatten_all()
-            .and_then(|t| t.to_vec1::<f32>())
-            .map_err(|e| Error::Model(format!("istft_window.safetensors: {e}")))?;
+        // Das Fenster lebt als `Vec<f32>` weiter; auf der CPU laden spart einen
+        // GPU-Umweg über ein Metal-Buffer.
+        let window =
+            candle_core::safetensors::load(dir.join("istft_window.safetensors"), &Device::Cpu)
+                .map_err(|e| Error::Model(format!("istft_window.safetensors: {e}")))?
+                .remove("window")
+                .ok_or_else(|| Error::Model("istft_window.safetensors: window fehlt".into()))?
+                .flatten_all()
+                .and_then(|t| t.to_vec1::<f32>())
+                .map_err(|e| Error::Model(format!("istft_window.safetensors: {e}")))?;
         if window.len() != config.win_length {
             return Err(Error::Model(format!(
                 "ISTFT-Fenster hat {} statt {} Werte",
@@ -111,10 +156,10 @@ impl Silero {
             config.accentor.clone(),
         ) {
             (Some(bert), Some(tokenizer), None) => Some(StressModel::Ru {
-                accentor: Accentor::load(dir, &device)?,
-                homosolver: HomoSolver::load(dir, &device, bert, tokenizer)?,
+                accentor: Accentor::load(dir)?,
+                homosolver: HomoSolver::load(dir, device, bert, tokenizer)?,
             }),
-            (None, None, Some(_)) => Some(StressModel::Uk(UkrainianAccentor::load(dir, &device)?)),
+            (None, None, Some(_)) => Some(StressModel::Uk(UkrainianAccentor::load(dir)?)),
             (None, None, None) => None,
             _ => {
                 return Err(Error::Model(format!(
@@ -129,7 +174,7 @@ impl Silero {
             stress,
             backbone,
             head,
-            device,
+            device: device.clone(),
         })
     }
 

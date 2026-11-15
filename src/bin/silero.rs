@@ -66,8 +66,13 @@ fn run() -> Result<()> {
     let samples = model.synthesize_text(&request.text, &request.voice)?;
     let synth = synth.elapsed();
     let duration = samples.len() as f64 / sample_rate as f64;
+    let device = if model.device().is_metal() {
+        "metal"
+    } else {
+        "cpu"
+    };
     eprintln!(
-        "{duration:.2}s Audio, synth {:.2}s (RTF {:.3}), load {:.2}s",
+        "{duration:.2}s Audio, synth {:.2}s (RTF {:.3}), load {:.2}s, Gerät {device}",
         synth.as_secs_f64(),
         synth.as_secs_f64() / duration,
         load.as_secs_f64()

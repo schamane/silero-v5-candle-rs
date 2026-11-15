@@ -86,6 +86,17 @@ fn compare(name: &str, actual: &Tensor, expected: &Tensor, tolerance: f32) {
     eprintln!("{name}: max {max:.3e}");
 }
 
+/// Metal akkumuliert GEMMs in anderer Reihenfolge. Über alle 34 Sätze gemessen:
+/// `backbone` 3.7e-3 statt 8.6e-4 auf der CPU, `mag` 1.7e-2 statt 4.8e-3.
+/// Die Grenzen für `cos`/`sin` (5e-3) und Audio (5e-3) gelten für beide Geräte.
+fn backbone_tolerance(device: &Device) -> f32 {
+    if device.is_metal() { 5e-3 } else { 1e-3 }
+}
+
+fn mag_tolerance(device: &Device) -> f32 {
+    if device.is_metal() { 2.5e-2 } else { 5e-3 }
+}
+
 fn compare_audio(name: &str, actual: &[f32], expected: &[f32], tolerance: f32) {
     assert_eq!(
         actual.len(),
@@ -275,11 +286,16 @@ fn goldens_match_python() {
                     &format!("Satz {id} {voice} backbone"),
                     &stages.features,
                     backbone,
-                    1e-3,
+                    backbone_tolerance(model.device()),
                 );
             }
             if let Some(mag) = tensors.get("mag") {
-                compare(&format!("Satz {id} {voice} mag"), &stages.mag, mag, 5e-3);
+                compare(
+                    &format!("Satz {id} {voice} mag"),
+                    &stages.mag,
+                    mag,
+                    mag_tolerance(model.device()),
+                );
                 compare(
                     &format!("Satz {id} {voice} cos"),
                     &stages.cos,

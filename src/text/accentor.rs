@@ -4,8 +4,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use candle_core::Device;
-
 use crate::config::Config;
 use crate::error::io_at;
 use crate::text::ngram::{Linear, NgramEmbedding, run_mlp, softmax_argmax};
@@ -61,14 +59,17 @@ pub struct Accentor {
 impl Accentor {
     /// Lädt Gewichte, n-Gramm-Tabelle und Ausnahmen aus `dir`.
     ///
+    /// Die Gewichte bleiben auf der CPU: der Akzentor rechnet in reinem Rust mit
+    /// `Vec<f32>`; ein Laden auf die GPU wäre nur ein zusätzlicher Kopierweg.
+    ///
     /// # Errors
     ///
     /// Gibt [`Error::Io`] zurück, wenn eine Datei nicht gelesen werden kann, und sonst
     /// [`Error::Model`], wenn eine Datei fehlt, eine Form oder Anzahl nicht passt oder ein
     /// n-Gramm beziehungsweise Ausnahmewort doppelt vorkommt.
-    pub fn load(dir: &Path, device: &Device) -> Result<Self> {
+    pub fn load(dir: &Path) -> Result<Self> {
         let path = dir.join("accentor.safetensors");
-        let tensors = candle_core::safetensors::load(&path, device)
+        let tensors = candle_core::safetensors::load(&path, &candle_core::Device::Cpu)
             .map_err(|e| Error::Model(format!("{}: {e}", path.display())))?;
         let ngrams_path = dir.join("ngrams.txt");
         let embedding = NgramEmbedding::load(

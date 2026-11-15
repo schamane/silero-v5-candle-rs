@@ -84,8 +84,12 @@ impl MultiHeadAttention {
         let k = Self::linear(x, &self.k_w, &self.k_b)?;
         let v = Self::linear(x, &self.v_w, &self.v_b)?;
         let split = |t: &Tensor| -> Result<Tensor> {
+            // Metal-GEMM akzeptiert nur contiguous oder transponierte Layouts; das
+            // `permute` allein lässt die Kopf-Dimension gestreift. CPU rechnet auch so,
+            // Metal bricht mit "Invalid matmul arguments" ab.
             t.reshape((batch, len, self.heads, self.head_dim))?
-                .permute((0, 2, 1, 3))
+                .permute((0, 2, 1, 3))?
+                .contiguous()
         };
         let q = split(&q)?;
         let k = split(&k)?;

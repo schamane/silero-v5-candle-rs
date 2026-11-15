@@ -1,7 +1,8 @@
 # silero-v5-candle-rs
 
 Silero v5 text-to-speech in Rust on [candle](https://github.com/huggingface/candle).
-One plain-text chunk in, 48 kHz mono f32 PCM out. CPU only. Russian (`v5_ru`),
+One plain-text chunk in, 48 kHz mono f32 PCM out. Metal on macOS; CPU where Metal
+is unavailable or disabled. Russian (`v5_ru`),
 the CIS base model (`v5_cis_base_nostress`) and `v5_cis_ext` are supported. Both
 CIS packages can bundle the Ukrainian n-gram accentor; for `v5_cis_ext` it is
 optional and only applied to `ukr_*` voices. The other CIS languages in those
@@ -21,7 +22,9 @@ Not affiliated with or endorsed by Silero.
 ## Requirements
 
 - Rust 1.88+ (edition 2024, Let-Chains)
-- `candle` 0.11.1, CPU backend
+- `candle` 0.11.1 with the Metal or CPU backend. The `metal` feature is on by
+  default and only compiles on Apple targets; elsewhere build with
+  `--no-default-features` for the CPU-only variant.
 - Model files under `models/silero-v5-ru/`, `models/silero-v5-cis-ext/` and/or
   `models/silero-v5-cis-base-nostress/` (not in git, see below)
 
@@ -36,6 +39,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 ```
+
+`Silero::load` probes Metal once: if the backend starts and a small GEMM round-trips,
+all model tensors run there; otherwise the whole model is loaded on the CPU.
+`Silero::device()` reports the choice. `Silero::load_with_device(dir, &Device::Cpu)`
+forces a device, for example for CPU/Metal comparisons.
 
 Long text should use `Silero::synthesize_text`, which splits it into chunks of at most 400 characters and joins the audio without a pause.
 
@@ -139,16 +147,20 @@ uv run scripts/export_accentor_uk.py
 ```sh
 cargo test                                    # unit tests; goldens skip without the model
 cargo test --release --test golden            # 34 sentences against the Python reference
+cargo test --release --no-default-features --test golden   # same suite on the CPU
 cargo test --release --test golden_cis        # Ukrainian sentence against the Python reference
 cargo test --release --test golden_cis_nostress   # 2 CIS-base sentences with the Python accentor
 cargo test --release --test golden_accentor_uk    # Ukrainian accentor logits and sentences
 make lint-rust                                    # clippy, all targets, -D warnings
 ```
 
-Set `SILERO_REQUIRE_GOLDEN=1` to fail instead of skipping when the model is missing, and to make a debug build fail instead of skipping the golden test.
+Set `SILERO_REQUIRE_GOLDEN=1` to fail instead of skipping when the model is missing, and to make a debug build fail instead of skipping the golden test. Golden tests run on the default device (Metal on macOS); `--no-default-features` pins the CPU path. Compare the two runs before changing tolerances.
 
 Golden tests compare token IDs exactly, per-stage tensors within 1e-4…5e-3 (shapes must
-match) and audio within 5e-3. The largest measured audio difference is 2.9e-3 (sentence 4,
+match) and audio within 5e-3. On Metal, `backbone` uses 5e-3 (measured 3.7e-3) and `mag`
+2.5e-2 (measured 1.7e-2) because f32 GEMMs accumulate in a different order; all other
+bounds, including audio at 5e-3, are shared. Over the 10 s benchmark text, Metal and CPU
+audio differ by at most 4 int16 LSB (1.2e-4). The largest measured audio difference is 2.9e-3 (sentence 4,
 aidar); sentence 33 is about 3.9e-5. Sentence 33 covers the padding path with two homographs
 of different BERT token counts. For `v5_cis_base_nostress`, the ConvNeXt and magnitude
 intermediates use scaled tolerances because a 1e-5 mel difference amplifies to ~5e-3; the
@@ -164,6 +176,13 @@ strings. `chunks_match_python` is a regression snapshot of
 Apple M1, CPU, `--release`: RTF 0.025–0.034 warm, first PCM after 0.09 s cold, peak RSS
 448 MB (measured against the Python reference at 0.49 s / 1.96 s / 931 MB). The spread
 comes from the CPU clock state; the per-stage shares are stable.
+
+Metal on the same M1: RTF 0.019–0.022 warm for a 10.05 s text, CPU 0.026 for the same
+text. The first Metal process pays about 11 s of shader compilation (4.5 s load, 6.9 s
+first chunk); later processes reuse the macOS shader cache and load in ~0.08 s. Warm
+Metal load is ~20 ms slower than CPU, so a single short CLI call is a wash; the gain
+appears when the load is amortized over several chunks. Sub-second chunks are dominated
+by per-op dispatch: measured RTF 0.034–0.051 on Metal vs 0.037–0.038 on CPU.
 
 Profile of one 4.94 s chunk (395 mel frames, median of 9 runs):
 

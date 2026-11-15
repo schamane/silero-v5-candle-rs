@@ -29,6 +29,11 @@ license = "CC-BY-NC-SA-4.0"
 readme = "README.md"
 publish = false
 
+[features]
+default = ["metal"]
+# Apple-GPU-Backend. Ohne dieses Feature (oder ohne Metal-Gerät) rechnet alles auf der CPU.
+metal = ["candle-core/metal", "candle-nn/metal", "candle-transformers/metal"]
+
 [lints]
 workspace = true
 
