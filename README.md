@@ -62,6 +62,16 @@ target/release/silero --device cpu --out out.wav "Привет, как дела?
 `auto` is `Silero::load` (Metal when usable, otherwise CPU); `metal` fails
 cleanly when no Metal device is available.
 
+The device can also be set with `SILERO_DEVICE=auto|cpu|metal` (read by `Silero::load` and
+the CLI; `--device` wins) or in code with `Silero::load_with_choice(dir, DeviceChoice::Cpu)`.
+On a base M1, Metal wins a single short chunk by about 20-30 %, but multi-chunk text is
+faster on CPU thanks to parallel chunks: set `SILERO_DEVICE=cpu` for long texts.
+
+Concurrency: on Metal a process-wide lock serialises the GPU stages (candle 0.11.1 can
+crash when buffers are released concurrently); the CPU ISTFT runs outside it. A Metal
+failure mid-run surfaces as `Err(Error::Pipeline)` with no CPU fallback, and a panic in a
+thread poisons candle's command encoder for later Metal calls.
+
 Long text should use `Silero::synthesize_text`, which splits it into chunks of at most 400 characters and joins the audio without a pause. Chunks run in parallel on both CPU and Metal, up to `MAX_PARALLEL_CHUNKS` (8).
 
 Five voices: `aidar`, `baya`, `kseniya`, `xenia`, `eugene`. Plain text only: no SSML

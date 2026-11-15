@@ -11,7 +11,8 @@ mod wav;
 use std::borrow::Cow;
 use std::fmt;
 use std::path::Path;
-use std::sync::LazyLock;
+use std::str::FromStr;
+use std::sync::{LazyLock, Mutex, MutexGuard, PoisonError};
 
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use rayon::{ThreadPool, ThreadPoolBuilder};
@@ -30,7 +31,7 @@ use text::homosolver::HomoSolver;
 use text::normalize::PreparedText;
 use text::normalize::prepare_text_input;
 use vocoder::convnext::Backbone;
-use vocoder::istft::{Head, Spectrum};
+use vocoder::istft::{Head, Spectrum, SpectrumData};
 
 pub use error::{Error, Result};
 pub use text::accentor_uk::{StressOptions, UkrainianAccentor};
@@ -52,8 +53,9 @@ pub const SAMPLE_RATE: u32 = 48_000;
 /// (`split_chunks(text, 400)`) und hält Text unter den Positionsgrenzen von BERT und Akustik.
 pub const CHUNK_LIMIT: usize = 400;
 
-/// Rechengerät für [`Silero::load`]: Metal, wenn der Backend-Start und ein kleiner
-/// GEMM gelingen, sonst CPU. Mit `--no-default-features` gibt es kein Metal.
+/// Rechengerät für [`Silero::load`]: Metal, wenn ein Metal-Gerät existiert und ein
+/// kleiner GEMM gelingt, sonst CPU. Ohne das Feature `metal` oder außerhalb von macOS
+/// gibt es kein Metal.
 ///
 /// Der Probelauf läuft einmal je Prozess und wird gemerkt: [`Silero::load`] und
 /// ein Aufrufer, der das Gerät nur anzeigen will, nennen dasselbe Gerät, und der
@@ -64,30 +66,107 @@ pub fn default_device() -> Device {
 }
 
 /// Führt den Probelauf; nur [`default_device`] ruft das.
-#[cfg(feature = "metal")]
+#[cfg(all(feature = "metal", target_os = "macos"))]
 fn probe_device() -> Device {
-    // candle indiziert `MTLCopyAllDevices()`; ohne Metal-Gerät panikt der Konstruktor,
-    // statt `Err` zu liefern. Eine Panik heißt hier "kein Metal".
-    let metal = std::panic::catch_unwind(|| Device::new_metal(0).ok())
+    // candle indiziert `MTLCopyAllDevices()` und panikt ohne Metal-Gerät. Die
+    // Vorprüfung über das Standardgerät vermeidet diesen Pfad.
+    if objc2_metal::MTLCreateSystemDefaultDevice().is_none() {
+        return Device::Cpu;
+    }
+    Device::new_metal(0)
         .ok()
-        .flatten();
-    metal
         .filter(|device| metal_probe(device).is_ok())
         .unwrap_or(Device::Cpu)
 }
 
-#[cfg(not(feature = "metal"))]
+#[cfg(not(all(feature = "metal", target_os = "macos")))]
 fn probe_device() -> Device {
     Device::Cpu
 }
 
 /// Prüft Rechnen und Rücktransfer auf `device`. `Device::new_metal` meldet auch dann
 /// Erfolg, wenn der erste Kernel scheitert.
-#[cfg(feature = "metal")]
+#[cfg(all(feature = "metal", target_os = "macos"))]
 fn metal_probe(device: &Device) -> candle_core::Result<()> {
     let square = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (2, 2), device)?;
     square.matmul(&square)?.to_vec2::<f32>()?;
     Ok(())
+}
+
+/// Wahl des Rechengeräts für [`Silero::load_with_choice`].
+///
+/// Auf einem Basis-M1 gewinnt Metal bei einem einzelnen kurzen Chunk etwa 20-30 %;
+/// bei mehrchunkigem Text ist die CPU dank paralleler Chunks schneller. Für lange
+/// Texte hilft `SILERO_DEVICE=cpu`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DeviceChoice {
+    /// [`default_device`]: Metal, wenn nutzbar, sonst CPU.
+    #[default]
+    Auto,
+    /// Immer die CPU.
+    Cpu,
+    /// Metal; Laden schlägt fehl, wenn Metal nicht verfügbar ist.
+    Metal,
+}
+
+impl FromStr for DeviceChoice {
+    type Err = Error;
+
+    /// Liest `auto`, `cpu` oder `metal` ohne Rücksicht auf Groß- und Kleinschreibung.
+    fn from_str(value: &str) -> Result<Self> {
+        let value = value.trim();
+        if value.eq_ignore_ascii_case("auto") {
+            Ok(Self::Auto)
+        } else if value.eq_ignore_ascii_case("cpu") {
+            Ok(Self::Cpu)
+        } else if value.eq_ignore_ascii_case("metal") {
+            Ok(Self::Metal)
+        } else {
+            Err(Error::Input(format!(
+                "unbekanntes Gerät {value:?}; erwartet auto, cpu oder metal"
+            )))
+        }
+    }
+}
+
+impl DeviceChoice {
+    /// Löst die Wahl in ein Gerät auf.
+    fn resolve(self) -> Result<Device> {
+        match self {
+            Self::Auto => Ok(default_device()),
+            Self::Cpu => Ok(Device::Cpu),
+            Self::Metal => {
+                let device = default_device();
+                if device.is_metal() {
+                    Ok(device)
+                } else {
+                    Err(Error::Input(
+                        "Metal ist nicht verfügbar (kein Metal-Gerät, Feature `metal` \
+                         aus oder Ziel nicht macOS)"
+                            .into(),
+                    ))
+                }
+            }
+        }
+    }
+}
+
+/// Prozessweite Sperre für alle Zugriffe auf ein Metal-Gerät.
+///
+/// candle 0.11.1 gibt Metal-Buffer in `metal_backend/device.rs` (`drop_unused_buffers`,
+/// aufgerufen aus `MetalStorage::to_cpu`) ohne ausreichende Synchronisation frei:
+/// Läuft das in mehreren Threads gleichzeitig, folgt ein `objc_release` auf einen
+/// schon freigegebenen Buffer (SIGSEGV, gemessen in rund 10 % der Prozesse mit
+/// 8 Threads). Die Sperre ist global und nicht je [`Silero`], weil [`default_device`]
+/// allen Modellen dieselbe `MetalDevice` gibt. Sie schützt keine Daten, deshalb ist
+/// eine vergiftete Sperre unbedenklich.
+static METAL_LOCK: Mutex<()> = Mutex::new(());
+
+/// Nimmt die Metal-Sperre, wenn `device` Metal ist; auf der CPU kostet das nichts.
+fn metal_guard(device: &Device) -> Option<MutexGuard<'static, ()>> {
+    device
+        .is_metal()
+        .then(|| METAL_LOCK.lock().unwrap_or_else(PoisonError::into_inner))
 }
 
 /// Betonungsmodell eines Pakets; die Variante macht ungültige Kombinationen
@@ -172,6 +251,19 @@ fn load_window(dir: &Path, win_length: usize) -> Result<Vec<f32>> {
 }
 
 /// Das Silero-v5-Modell: Akustik, Vocoder und gegebenenfalls Betonungsmodell eines Pakets.
+///
+/// # Fehler auf Metal
+///
+/// Scheitert ein Metal-Aufruf mitten im Lauf, erscheint das als
+/// `Err(`[`Error::Pipeline`]`)`; es gibt keinen Rückfall auf die CPU. candles
+/// `command_encoder` nimmt seine Sperre mit `lock().unwrap()`: Panikt ein Thread
+/// dabei, schlagen alle späteren Metal-Aufrufe fehl oder panikten ebenfalls.
+///
+/// # Nebenläufigkeit
+///
+/// Auf Metal serialisiert eine prozessweite Sperre die Geräte-Stufen (Akustik bis
+/// Spektrum-Readback), weil candle 0.11.1 beim parallelen Freigeben von Buffern
+/// abstürzen kann. Die ISTFT läuft außerhalb der Sperre; auf der CPU gibt es keine Sperre.
 pub struct Silero {
     config: Config,
     /// Sprecher-Namen, sortiert; `voices` und `has_voice` brauchen so keine Kopie.
@@ -195,16 +287,40 @@ impl fmt::Debug for Silero {
 
 impl Silero {
     /// Lädt Konfiguration, Gewichte und Wörterbücher aus `dir` auf das schnellste
-    /// verfügbare Gerät: Metal, wenn der Probelauf gelingt, sonst CPU.
+    /// verfügbare Gerät: Metal, wenn der Probelauf gelingt, sonst CPU. Die
+    /// Umgebungsvariable `SILERO_DEVICE` (`auto`, `cpu` oder `metal`) überstimmt
+    /// diese Wahl.
     ///
-    /// Welches Gerät gewählt wurde, sagt [`Silero::device`].
+    /// Auf einem Basis-M1 gewinnt Metal bei einem einzelnen kurzen Chunk etwa 20-30 %;
+    /// mehrchunkiger Text ist auf der CPU dank paralleler Chunks schneller
+    /// (`SILERO_DEVICE=cpu`). Welches Gerät gewählt wurde, sagt [`Silero::device`].
+    ///
+    /// Mitten im Lauf scheiternde Metal-Aufrufe erscheinen als [`Error::Pipeline`],
+    /// ohne Rückfall auf die CPU; siehe die Hinweise bei [`Silero`].
     ///
     /// # Errors
     ///
     /// Gibt [`Error::Io`] zurück, wenn eine Datei nicht gelesen werden kann, und
-    /// [`Error::Model`], wenn eine Datei fehlt, ungültig ist oder nicht zur Architektur passt.
+    /// [`Error::Model`], wenn eine Datei fehlt, ungültig ist oder nicht zur Architektur
+    /// passt. [`Error::Input`] meldet einen ungültigen Wert in `SILERO_DEVICE` oder
+    /// `metal` ohne verfügbares Metal.
     pub fn load(dir: &Path) -> Result<Self> {
-        Self::load_impl(dir, &default_device(), true)
+        let choice = match std::env::var("SILERO_DEVICE") {
+            Ok(value) => value.parse()?,
+            Err(_) => DeviceChoice::Auto,
+        };
+        Self::load_with_choice(dir, choice)
+    }
+
+    /// Lädt das Modell auf das Gerät, das `choice` benennt. Anders als
+    /// [`Silero::load`] liest das nicht `SILERO_DEVICE`.
+    ///
+    /// # Errors
+    ///
+    /// Wie [`Silero::load`]; [`DeviceChoice::Metal`] gibt [`Error::Input`] zurück,
+    /// wenn Metal nicht verfügbar ist.
+    pub fn load_with_choice(dir: &Path, choice: DeviceChoice) -> Result<Self> {
+        Self::load_impl(dir, &choice.resolve()?, true)
     }
 
     /// Lädt das Modell auf ein explizit gewähltes Gerät, etwa `&Device::Cpu` für einen
@@ -467,8 +583,12 @@ impl Silero {
         self.head.forward(features).map_err(stage("vocoder-head"))
     }
 
-    fn istft_stage(&self, spectrum: &Spectrum) -> Result<Vec<f32>> {
-        self.head.istft(spectrum).map_err(stage("istft"))
+    fn readback_stage(&self, spectrum: &Spectrum) -> Result<SpectrumData> {
+        self.head.readback(spectrum).map_err(stage("istft"))
+    }
+
+    fn overlap_add_stage(&self, data: &SpectrumData) -> Result<Vec<f32>> {
+        self.head.overlap_add(data).map_err(stage("istft"))
     }
 
     /// Die schlanke Produktionspipeline: gibt jede Zwischengröße frei, sobald die nächste
@@ -482,13 +602,19 @@ impl Silero {
             self.config.sequence(&accented.accented)?
         };
         drop(prepared);
-        let features = {
-            let output = self.acoustic_stage(&ids, voice)?;
-            self.features_stage(&output.mel)?
+        // Die Sperre deckt alle Geräte-Stufen bis zum Readback ab; die ISTFT danach
+        // läuft ohne Sperre und überlappt mit dem nächsten Chunk.
+        let data = {
+            let _metal = metal_guard(&self.device);
+            let features = {
+                let output = self.acoustic_stage(&ids, voice)?;
+                self.features_stage(&output.mel)?
+            };
+            let spectrum = self.spectrum_stage(&features)?;
+            drop(features);
+            self.readback_stage(&spectrum)?
         };
-        let spectrum = self.spectrum_stage(&features)?;
-        drop(features);
-        self.istft_stage(&spectrum)
+        self.overlap_add_stage(&data)
     }
 
     #[must_use]
@@ -521,14 +647,23 @@ impl Silero {
         let Accented { homo, accented } = self.accent(&prepared.sentence, voice)?;
         let (homo, accented) = (homo.into_owned(), accented.into_owned());
         let ids = self.config.sequence(&accented)?;
+        // Der Rest greift auf das Gerät zu (auch die Tensor-Sichten unten): Sperre bis zum Ende.
+        let _metal = metal_guard(&self.device);
         let output = self.acoustic_stage(&ids, voice)?;
         let features = self.features_stage(&output.mel)?;
         let spectrum = self.spectrum_stage(&features)?;
-        let audio = self.istft_stage(&spectrum)?;
+        let data = self.readback_stage(&spectrum)?;
+        let audio = self.overlap_add_stage(&data)?;
         // Die Stufen liefern `[1, 1201, T]`; die Transposition ist nur eine Sicht ohne Kopie.
+        // Der Metal-Spektrum-Graph spart das `minimum` und begrenzt erst in der ISTFT;
+        // die Debug-Sicht muss aber den Modellvertrag `min(exp(x), 100)` zeigen.
+        let mag = spectrum
+            .mag
+            .minimum(100f32)
+            .map_err(stage("vocoder-head"))?;
         let stage_view = |tensor: &Tensor| tensor.transpose(1, 2).map_err(stage("vocoder-head"));
         let (mag, cos, sin) = (
-            stage_view(&spectrum.mag)?,
+            stage_view(&mag)?,
             stage_view(&spectrum.cos)?,
             stage_view(&spectrum.sin)?,
         );
@@ -587,4 +722,34 @@ pub struct Stages {
     pub cos: Tensor,
     pub sin: Tensor,
     pub audio: Vec<f32>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn device_choice_parses_case_insensitive() {
+        for (text, want) in [
+            ("auto", DeviceChoice::Auto),
+            ("CPU", DeviceChoice::Cpu),
+            (" Metal ", DeviceChoice::Metal),
+        ] {
+            assert_eq!(
+                text.parse::<DeviceChoice>().ok(),
+                Some(want),
+                "Eingabe {text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn device_choice_rejects_unknown() {
+        assert!(matches!(
+            "tpu".parse::<DeviceChoice>(),
+            Err(Error::Input(_))
+        ));
+        assert!(matches!("".parse::<DeviceChoice>(), Err(Error::Input(_))));
+        assert_eq!(DeviceChoice::default(), DeviceChoice::Auto);
+    }
 }

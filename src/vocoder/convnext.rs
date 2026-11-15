@@ -17,9 +17,74 @@ struct Block {
     /// Bias der depthwise Conv als `[1, 1, C]`.
     dw_bias: Tensor,
     norm: LayerNorm,
-    pw1: Linear,
-    pw2: Linear,
-    gamma: Tensor,
+    pointwise: Pointwise,
+}
+
+/// Die beiden Pointwise-Layer samt Layer-Scale `gamma`.
+enum Pointwise {
+    /// CPU: Linear, Linear, dann `broadcast_mul(gamma)`.
+    Plain {
+        pw1: Linear,
+        pw2: Linear,
+        gamma: Tensor,
+    },
+    /// Metal: candles Broadcast-Kernel ist dort rund fünfmal langsamer als ein
+    /// zusammenhängender. Der Bias steckt deshalb als letzte Gewichtszeile im GEMM
+    /// (Ones-Spalte am Eingang), `gamma` ist in `pw2` eingerechnet.
+    Fused {
+        /// `[512 + 1, 1536]`.
+        w1: Tensor,
+        /// `[1536 + 1, 512]`, mit `gamma` skaliert.
+        w2: Tensor,
+    },
+}
+
+impl Pointwise {
+    fn load(block: &VarBuilder) -> Result<Self> {
+        let pw1 = candle_nn::linear(512, 1536, block.pp("pwconv1"))?;
+        let pw2 = candle_nn::linear(1536, 512, block.pp("pwconv2"))?;
+        let gamma = block.get(512, "gamma")?;
+        if !block.device().is_metal() {
+            return Ok(Self::Plain { pw1, pw2, gamma });
+        }
+        let (Some(b1), Some(b2)) = (pw1.bias(), pw2.bias()) else {
+            return Err(candle_core::Error::Msg("pwconv: Bias fehlt".into()));
+        };
+        let w1 = Tensor::cat(
+            &[&pw1.weight().t()?.contiguous()?, &b1.reshape((1, 1536))?],
+            0,
+        )?;
+        let w2 = Tensor::cat(
+            &[
+                &pw2.weight()
+                    .broadcast_mul(&gamma.reshape((512, 1))?)?
+                    .t()?
+                    .contiguous()?,
+                &b2.mul(&gamma)?.reshape((1, 512))?,
+            ],
+            0,
+        )?;
+        Ok(Self::Fused { w1, w2 })
+    }
+
+    /// `ones`: `[batch * T, 1]`; nur der Metal-Pfad braucht sie.
+    fn forward(&self, y: &Tensor, ones: &Tensor) -> Result<Tensor> {
+        match self {
+            Self::Plain { pw1, pw2, gamma } => {
+                let y = gelu(&pw1.forward(y)?)?;
+                pw2.forward(&y)?.broadcast_mul(gamma)
+            }
+            Self::Fused { w1, w2 } => {
+                let (batch, len, channels) = y.dims3()?;
+                let rows = batch * len;
+                let y = Tensor::cat(&[&y.reshape((rows, channels))?, ones], 1)?.matmul(w1)?;
+                let y = gelu(&y)?;
+                Tensor::cat(&[&y, ones], 1)?
+                    .matmul(w2)?
+                    .reshape((batch, len, channels))
+            }
+        }
+    }
 }
 
 impl Backbone {
@@ -37,16 +102,7 @@ impl Backbone {
         let norm = candle_nn::layer_norm(512, 1e-6, vb.pp("norm"))?;
         let mut blocks = Vec::with_capacity(8);
         for index in 0..8 {
-            let block = vb.pp(format!("convnext.{index}"));
-            let dw_weight = block.get((512, 1, 7), "dwconv.weight")?;
-            blocks.push(Block {
-                dw_taps: depthwise_taps(&dw_weight)?,
-                dw_bias: block.get(512, "dwconv.bias")?.reshape((1, 1, 512))?,
-                norm: candle_nn::layer_norm(512, 1e-6, block.pp("norm"))?,
-                pw1: candle_nn::linear(512, 1536, block.pp("pwconv1"))?,
-                pw2: candle_nn::linear(1536, 512, block.pp("pwconv2"))?,
-                gamma: block.get(512, "gamma")?,
-            });
+            blocks.push(Block::load(&vb.pp(format!("convnext.{index}")))?);
         }
         let final_norm = candle_nn::layer_norm(512, 1e-6, vb.pp("final_layer_norm"))?;
         Ok(Self {
@@ -62,20 +118,30 @@ impl Backbone {
         let x = self.embed.forward(mel)?;
         // Ab hier bleibt alles im NTC-Layout `[1, T, C]`.
         let mut x = self.norm.forward(&x.transpose(1, 2)?.contiguous()?)?;
+        let (batch, len, _) = x.dims3()?;
+        let ones = Tensor::ones((batch * len, 1), x.dtype(), x.device())?;
         for block in &self.blocks {
-            x = block.forward(&x)?;
+            x = block.forward(&x, &ones)?;
         }
         self.final_norm.forward(&x)
     }
 }
 
 impl Block {
-    fn forward(&self, x: &Tensor) -> Result<Tensor> {
+    fn load(block: &VarBuilder) -> Result<Self> {
+        let dw_weight = block.get((512, 1, 7), "dwconv.weight")?;
+        Ok(Self {
+            dw_taps: depthwise_taps(&dw_weight)?,
+            dw_bias: block.get(512, "dwconv.bias")?.reshape((1, 1, 512))?,
+            norm: candle_nn::layer_norm(512, 1e-6, block.pp("norm"))?,
+            pointwise: Pointwise::load(block)?,
+        })
+    }
+
+    fn forward(&self, x: &Tensor, ones: &Tensor) -> Result<Tensor> {
         let y = depthwise(&self.dw_taps, &self.dw_bias, x)?;
         let y = self.norm.forward(&y)?;
-        let y = gelu(&self.pw1.forward(&y)?)?;
-        let y = self.pw2.forward(&y)?;
-        let y = y.broadcast_mul(&self.gamma)?;
+        let y = self.pointwise.forward(&y, ones)?;
         x.add(&y)
     }
 }
@@ -144,7 +210,93 @@ fn depthwise(taps: &[Tensor], bias: &Tensor, x: &Tensor) -> Result<Tensor> {
 mod tests {
     use candle_core::{Device, Tensor};
 
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    use std::collections::HashMap;
+
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    use candle_core::DType;
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    use candle_nn::VarBuilder;
+
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    use super::Block;
     use super::gelu;
+
+    /// Zufällige Blockgewichte; `gamma` absichtlich weit von 1 entfernt.
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    fn block_tensors() -> HashMap<String, Tensor> {
+        let shapes: [(&str, Vec<usize>); 9] = [
+            ("dwconv.weight", vec![512, 1, 7]),
+            ("dwconv.bias", vec![512]),
+            ("norm.weight", vec![512]),
+            ("norm.bias", vec![512]),
+            ("pwconv1.weight", vec![1536, 512]),
+            ("pwconv1.bias", vec![1536]),
+            ("pwconv2.weight", vec![512, 1536]),
+            ("pwconv2.bias", vec![512]),
+            ("gamma", vec![512]),
+        ];
+        shapes
+            .into_iter()
+            .map(|(name, shape)| {
+                let scale = if name == "gamma" { 0.3 } else { 0.1 };
+                let tensor = Tensor::randn(0f32, scale, shape, &Device::Cpu).expect("randn");
+                (name.to_owned(), tensor)
+            })
+            .collect()
+    }
+
+    /// Der Metal-Block (Bias im GEMM, `gamma` eingerechnet) stimmt mit dem
+    /// ungefusten CPU-Block überein. Ohne Metal-Gerät wird übersprungen.
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    #[test]
+    fn fused_metal_block_matches_unfused_reference() {
+        let Ok(metal) = Device::new_metal(0) else {
+            eprintln!("SKIP: kein Metal-Gerät");
+            return;
+        };
+        let tensors = block_tensors();
+        let load = |device: &Device| {
+            let moved = tensors
+                .iter()
+                .map(|(name, tensor)| (name.clone(), tensor.to_device(device).expect("to_device")))
+                .collect();
+            let vb = VarBuilder::from_tensors(moved, DType::F32, device);
+            Block::load(&vb).expect("Block")
+        };
+        let (cpu_block, metal_block) = (load(&Device::Cpu), load(&metal));
+        let len = 200;
+        let input = Tensor::randn(0f32, 1f32, (1, len, 512), &Device::Cpu).expect("randn");
+        let ones = |device: &Device| Tensor::ones((len, 1), DType::F32, device).expect("ones");
+        let want = cpu_block
+            .forward(&input, &ones(&Device::Cpu))
+            .expect("CPU-Block");
+        let got = metal_block
+            .forward(&input.to_device(&metal).expect("to_device"), &ones(&metal))
+            .expect("Metal-Block")
+            .to_device(&Device::Cpu)
+            .expect("Rücklesen");
+        let want = want
+            .flatten_all()
+            .expect("flatten")
+            .to_vec1::<f32>()
+            .expect("vec");
+        let got = got
+            .flatten_all()
+            .expect("flatten")
+            .to_vec1::<f32>()
+            .expect("vec");
+        let scale = want.iter().fold(0f32, |m, v| m.max(v.abs()));
+        let diff = want
+            .iter()
+            .zip(&got)
+            .fold(0f32, |m, (w, g)| m.max((w - g).abs()));
+        assert!(
+            diff / scale < 1e-4,
+            "relative Abweichung {} >= 1e-4",
+            diff / scale
+        );
+    }
 
     #[test]
     fn gelu_matches_gelu_erf_on_cpu() {

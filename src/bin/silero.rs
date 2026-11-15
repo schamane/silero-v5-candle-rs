@@ -4,8 +4,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Instant;
 
-use candle_core::Device;
-use silero_v5_candle::{Error, Result, Silero, default_device, write_wav};
+use silero_v5_candle::{DeviceChoice, Error, Result, Silero, write_wav};
 
 const DEFAULT_MODEL: &str = "models/silero-v5-ru";
 const DEFAULT_VOICE: &str = "baya";
@@ -18,19 +17,10 @@ Optionen:
   --out DATEI           WAV-Datei, die geschrieben wird (Pflicht)
   --model VERZEICHNIS   Modellverzeichnis (Standard: models/silero-v5-ru)
   --voice NAME          Stimme, etwa baya (Standard: baya)
-  --device GERÄT        auto, cpu oder metal (Standard: auto)
+  --device GERÄT        auto, cpu oder metal (Standard: $SILERO_DEVICE, sonst auto)
   --help                diese Hilfe anzeigen
   --                    beendet die Optionen; danach darf TEXT mit -- beginnen
 ";
-
-/// Gerätewahl der CLI. `Auto` entspricht [`Silero::load`].
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-enum DeviceChoice {
-    #[default]
-    Auto,
-    Cpu,
-    Metal,
-}
 
 /// Was der Aufruf tun soll.
 enum Command {
@@ -70,19 +60,7 @@ fn run() -> Result<()> {
         Command::Synthesize(request) => request,
     };
     let start = Instant::now();
-    let model = match request.device {
-        DeviceChoice::Auto => Silero::load(&request.dir)?,
-        DeviceChoice::Cpu => Silero::load_with_device(&request.dir, &Device::Cpu)?,
-        DeviceChoice::Metal => {
-            let device = default_device();
-            if !device.is_metal() {
-                return Err(Error::Input(
-                    "Metal ist auf diesem Gerät nicht verfügbar".into(),
-                ));
-            }
-            Silero::load_with_device(&request.dir, &device)?
-        }
-    };
+    let model = Silero::load_with_choice(&request.dir, request.device)?;
     let sample_rate = model.sample_rate();
     let load = start.elapsed();
     let synth = Instant::now();
@@ -113,7 +91,7 @@ where
     let mut args = args.into_iter();
     let mut dir = PathBuf::from(DEFAULT_MODEL);
     let mut voice = DEFAULT_VOICE.to_string();
-    let mut device = DeviceChoice::Auto;
+    let mut device = None;
     let mut out = None;
     let mut words = Vec::new();
     while let Some(arg) = args.next() {
@@ -125,7 +103,7 @@ where
             }
             "--model" => dir = PathBuf::from(value(&mut args, "--model", "einen Pfad")?),
             "--voice" => voice = value(&mut args, "--voice", "einen Namen")?,
-            "--device" => device = parse_device(value(&mut args, "--device", "ein Gerät")?)?,
+            "--device" => device = Some(value(&mut args, "--device", "ein Gerät")?.parse()?),
             "--out" => out = Some(PathBuf::from(value(&mut args, "--out", "einen Pfad")?)),
             flag if flag.starts_with("--") => {
                 return Err(Error::Input(format!("unbekannte Option {flag}")));
@@ -138,6 +116,10 @@ where
     if text.trim().is_empty() {
         return Err(Error::Input("text fehlt".into()));
     }
+    let device = match device {
+        Some(device) => device,
+        None => env_device()?,
+    };
     Ok(Command::Synthesize(Request {
         dir,
         voice,
@@ -147,14 +129,11 @@ where
     }))
 }
 
-fn parse_device(value: String) -> Result<DeviceChoice> {
-    match value.as_str() {
-        "auto" => Ok(DeviceChoice::Auto),
-        "cpu" => Ok(DeviceChoice::Cpu),
-        "metal" => Ok(DeviceChoice::Metal),
-        other => Err(Error::Input(format!(
-            "unbekanntes Gerät {other}; erwartet auto, cpu oder metal"
-        ))),
+/// `SILERO_DEVICE` als Rückfall, wenn `--device` fehlt.
+fn env_device() -> Result<DeviceChoice> {
+    match std::env::var("SILERO_DEVICE") {
+        Ok(value) => value.parse(),
+        Err(_) => Ok(DeviceChoice::Auto),
     }
 }
 

@@ -1859,6 +1859,7 @@ dependencies = [
  "candle-core",
  "candle-nn",
  "candle-transformers",
+ "objc2-metal",
  "rayon",
  "realfft",
  "serde",

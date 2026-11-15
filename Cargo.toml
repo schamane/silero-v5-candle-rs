@@ -32,7 +32,10 @@ publish = false
 [features]
 default = ["metal"]
 # Apple-GPU-Backend. Ohne dieses Feature (oder ohne Metal-Gerät) rechnet alles auf der CPU.
-metal = ["candle-core/metal", "candle-nn/metal", "candle-transformers/metal"]
+# Das Feature selbst ist leer: candles `metal`-Features hängen unten an
+# `cfg(target_os = "macos")`, weil objc2 auf anderen Zielen nicht kompiliert. So baut
+# `cargo check --target x86_64-unknown-linux-gnu` auch mit den Standard-Features.
+metal = []
 # Optionale BLAS-Backends für die CPU (Apple Accelerate bzw. Intel MKL); nicht Standard.
 # Opt-in. Die Golden-Tests decken die BLAS-Rundung mit einer eigenen backbone-Toleranz ab.
 accelerate = ["candle-core/accelerate", "candle-nn/accelerate", "candle-transformers/accelerate"]
@@ -66,3 +69,13 @@ thiserror = "2"
 [dev-dependencies]
 # Aktiviert `test-util` für Tests und Beispiele, ohne die Standard-Features zu ändern.
 silero-v5-candle-rs = { path = ".", default-features = false, features = ["test-util"] }
+
+# Metal-Backend nur auf macOS. Cargo vereinigt die Features dieser Tabelle mit den
+# obigen, daher gilt `metal` bei jedem macOS-Build unabhängig vom Feature-Schalter;
+# der Code schaltet das Gerät über `cfg(all(feature = "metal", target_os = "macos"))`.
+[target.'cfg(target_os = "macos")'.dependencies]
+candle-core = { version = "0.11", features = ["metal"] }
+candle-nn = { version = "0.11", features = ["metal"] }
+candle-transformers = { version = "0.11", features = ["metal"] }
+# Ohne Panik prüfen, ob ein Metal-Gerät existiert (dieselbe Version wie in candle).
+objc2-metal = "0.3"
