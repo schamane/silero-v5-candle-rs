@@ -3,9 +3,9 @@
 use candle_core::{Device, Result, Tensor};
 use candle_nn::{Linear, Module, VarBuilder};
 
-use super::transformer::{ForwardTransformer, embedding};
+use super::transformer::{ForwardTransformer, embedding, speaker_vector};
 
-pub struct SeriesPredictor {
+pub(crate) struct SeriesPredictor {
     embedding: Tensor,
     speaker: Tensor,
     transformer: ForwardTransformer,
@@ -14,7 +14,7 @@ pub struct SeriesPredictor {
 }
 
 impl SeriesPredictor {
-    pub fn load(
+    pub(crate) fn load(
         vb: VarBuilder,
         device: &Device,
         symbol_count: usize,
@@ -35,26 +35,23 @@ impl SeriesPredictor {
     }
 
     /// `text` sind die Symbol-IDs; Rückgabe `[1, T, 1]`.
-    pub fn forward(&self, ids: &[u32], speaker_id: u32) -> Result<Tensor> {
+    pub(crate) fn forward(&self, ids: &[u32], speaker_id: u32) -> Result<Tensor> {
         let embedded = embedding(&self.embedding, ids, &self.device)?;
         let embedded = embedded.unsqueeze(0)?;
-        let speaker = self
-            .speaker
-            .index_select(&Tensor::from_vec(vec![speaker_id], 1, &self.device)?, 0)?
-            .reshape((1, 1, 64))?;
+        let speaker = speaker_vector(&self.speaker, speaker_id, 64, &self.device)?;
         let x = embedded.broadcast_add(&speaker)?;
         let x = self.transformer.forward(&x)?;
         self.lin.forward(&x)
     }
 }
 
-pub struct Predictors {
+pub(crate) struct Predictors {
     pub duration: SeriesPredictor,
     pub pitch: SeriesPredictor,
 }
 
 impl Predictors {
-    pub fn load(
+    pub(crate) fn load(
         vb: VarBuilder,
         device: &Device,
         symbol_count: usize,
@@ -76,12 +73,12 @@ impl Predictors {
     }
 
     /// `[1, T]` rohe Log-Dauern.
-    pub fn durations(&self, ids: &[u32], speaker_id: u32) -> Result<Tensor> {
+    pub(crate) fn durations(&self, ids: &[u32], speaker_id: u32) -> Result<Tensor> {
         self.duration.forward(ids, speaker_id)?.squeeze(2)
     }
 
     /// `[1, 1, T]` rohe Pitch-Werte (transponiert wie `JitOldPitchPredictor`).
-    pub fn pitch(&self, ids: &[u32], speaker_id: u32) -> Result<Tensor> {
+    pub(crate) fn pitch(&self, ids: &[u32], speaker_id: u32) -> Result<Tensor> {
         self.pitch.forward(ids, speaker_id)?.transpose(1, 2)
     }
 }

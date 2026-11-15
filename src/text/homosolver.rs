@@ -10,6 +10,7 @@ use candle_transformers::models::bert::{BertModel, Config as BertCandleConfig, H
 
 use crate::config::{BertConfig, TokenizerConfig};
 use crate::error::{io_at, stage};
+use crate::text::accentor::AccentOptions;
 use crate::text::bert_tokenizer::BertTokenizer;
 use crate::{Error, Result};
 
@@ -20,37 +21,15 @@ const HOMODICT_WORD_COUNT: usize = 1924;
 /// Eingaben auf (Marker-Embedding und Wort-Mittel).
 const HOMO_HEAD_HIDDEN: usize = 256;
 
-/// Schalter für [`HomoSolver::solve`]. `Default` schaltet alle drei ein, wie die Pipeline sie
-/// nutzt.
-#[derive(Debug, Clone, Copy)]
-#[non_exhaustive]
-pub struct SolveOptions {
-    /// Betonung setzen.
-    pub put_stress: bool,
-    /// `ё` setzen.
-    pub put_yo: bool,
-    /// Auch Wörter mit nur einem Vokal betonen.
-    pub stress_single_vowel: bool,
-}
-
-impl Default for SolveOptions {
-    fn default() -> Self {
-        Self {
-            put_stress: true,
-            put_yo: true,
-            stress_single_vowel: true,
-        }
-    }
-}
-
-pub struct HomoSolver {
+pub(crate) struct HomoSolver {
     bert: BertModel,
     head0: Linear,
     head1: Linear,
     tokenizer: BertTokenizer,
     homodict: HashMap<String, Vec<String>>,
     device: Device,
-    bert_config: BertConfig,
+    /// `hidden_size` des BERT-Modells; der Kopf nimmt `2 * hidden_size` Merkmale.
+    hidden_size: usize,
 }
 
 impl HomoSolver {
@@ -61,11 +40,11 @@ impl HomoSolver {
     /// Gibt einen Fehler zurück, wenn eine Datei oder ein Gewicht fehlt, die BERT-
     /// Konfiguration unbekannt ist oder das Wörterbuch nicht `HOMODICT_WORD_COUNT`
     /// Wörter enthält.
-    pub fn load(
+    pub(crate) fn load(
         dir: &Path,
         device: &Device,
-        bert_config: BertConfig,
-        tokenizer_config: TokenizerConfig,
+        bert_config: &BertConfig,
+        tokenizer_config: &TokenizerConfig,
     ) -> Result<Self> {
         let config = BertCandleConfig {
             vocab_size: bert_config.vocab_size,
@@ -77,7 +56,11 @@ impl HomoSolver {
                 "gelu" => HiddenAct::Gelu,
                 "gelu_approximate" => HiddenAct::GeluApproximate,
                 "relu" => HiddenAct::Relu,
-                other => return Err(Error::Model(format!("unbekannte BERT-Aktivierung {other}"))),
+                other => {
+                    return Err(Error::model_msg(format!(
+                        "unbekannte BERT-Aktivierung {other}"
+                    )));
+                }
             },
             hidden_dropout_prob: bert_config.hidden_dropout_prob,
             max_position_embeddings: bert_config.max_position_embeddings,
@@ -95,22 +78,22 @@ impl HomoSolver {
         // oder ersetzt werden. Sonst ist der Inhalt des gemappten Speichers undefiniert.
         let vb = unsafe {
             VarBuilder::from_mmaped_safetensors(std::slice::from_ref(&path), DType::F32, device)
-                .map_err(|e| Error::Model(format!("{}: {e}", path.display())))?
+                .map_err(|e| Error::model(path.display().to_string(), e))?
         };
         let bert = BertModel::load(vb.pp("bert"), &config)
-            .map_err(|e| Error::Model(format!("{}: {e}", path.display())))?;
+            .map_err(|e| Error::model(path.display().to_string(), e))?;
         let head_in = 2 * bert_config.hidden_size;
         let head0 = candle_nn::linear(head_in, HOMO_HEAD_HIDDEN, vb.pp("homo_clf.0"))
-            .map_err(|e| Error::Model(format!("{}: homo_clf.0: {e}", path.display())))?;
+            .map_err(|e| Error::model(format!("{}: homo_clf.0", path.display()), e))?;
         let head1 = candle_nn::linear(HOMO_HEAD_HIDDEN, 1, vb.pp("homo_clf.3"))
-            .map_err(|e| Error::Model(format!("{}: homo_clf.3: {e}", path.display())))?;
+            .map_err(|e| Error::model(format!("{}: homo_clf.3", path.display()), e))?;
 
         let dict_path = dir.join("homodict.json");
         let dict_text = std::fs::read_to_string(&dict_path).map_err(io_at(dict_path))?;
-        let mut homodict: HashMap<String, Vec<String>> = serde_json::from_str(&dict_text)
-            .map_err(|e| Error::Model(format!("homodict.json: {e}")))?;
+        let mut homodict: HashMap<String, Vec<String>> =
+            serde_json::from_str(&dict_text).map_err(|e| Error::model("homodict.json", e))?;
         if homodict.len() != HOMODICT_WORD_COUNT {
-            return Err(Error::Model(format!(
+            return Err(Error::model_msg(format!(
                 "homodict.json: {} statt {HOMODICT_WORD_COUNT} Wörter",
                 homodict.len()
             )));
@@ -120,7 +103,7 @@ impl HomoSolver {
         for variants in homodict.values_mut() {
             variants.sort();
         }
-        let tokenizer = BertTokenizer::load(dir, tokenizer_config, bert_config.vocab_size)?;
+        let tokenizer = BertTokenizer::load(dir, tokenizer_config.clone(), bert_config.vocab_size)?;
         Ok(Self {
             bert,
             head0,
@@ -128,22 +111,8 @@ impl HomoSolver {
             tokenizer,
             homodict,
             device: device.clone(),
-            bert_config,
+            hidden_size: bert_config.hidden_size,
         })
-    }
-
-    /// Schreibgeschützte Sicht auf das Homograph-Wörterbuch, nur für die Tests.
-    pub fn homodict(&self) -> &HashMap<String, Vec<String>> {
-        &self.homodict
-    }
-
-    /// Wörter mit mindestens einem `ё` in einer Variante (für `skip_yo_words`).
-    pub fn yo_words(&self) -> std::collections::HashSet<String> {
-        self.homodict
-            .iter()
-            .filter(|(_, variants)| variants.iter().any(|v| v.contains('ё')))
-            .map(|(word, _)| word.clone())
-            .collect()
     }
 
     /// Setzt Betonung und `ё` für Homographen im Satz.
@@ -152,13 +121,8 @@ impl HomoSolver {
     ///
     /// Gibt einen Fehler zurück, wenn BERT oder der Kopf fehlschlägt ([`Error::Pipeline`])
     /// oder das Vokabular die Homograph-Marker nicht enthält ([`Error::Model`]).
-    pub fn solve(&self, sentence: &[char], options: SolveOptions) -> Result<Vec<char>> {
-        let SolveOptions {
-            put_stress,
-            put_yo,
-            stress_single_vowel,
-        } = options;
-        if !(put_stress || put_yo) {
+    pub(crate) fn solve(&self, sentence: &[char], options: AccentOptions) -> Result<Vec<char>> {
+        if !(options.put_stress || options.put_yo) {
             return Ok(sentence.to_vec());
         }
         let matches = self.find_matches(sentence);
@@ -179,47 +143,12 @@ impl HomoSolver {
         for (found, pred) in matches.iter().zip(preds) {
             let start = found.start as i32 + offset;
             let end = found.end as i32 + offset;
-            let key = found.word.iter().collect::<String>().to_lowercase();
-            let Some(variants) = self.homodict.get(&key) else {
+            let Some((replacement, stress_inserted)) =
+                self.variant_replacement(found, pred, options)
+            else {
                 continue;
             };
-            let Some(variant) = variants.get(pred as usize) else {
-                continue;
-            };
-            let mut word_pred: Vec<char> = if put_yo {
-                variant.chars().collect()
-            } else {
-                variant
-                    .chars()
-                    .map(|ch| if ch == 'ё' { 'е' } else { ch })
-                    .collect()
-            };
-            let n_vowels = word_pred
-                .iter()
-                .filter(|ch| crate::text::accentor::is_vowel(**ch))
-                .count();
-            let Some(stress_idx) = word_pred.iter().position(|ch| *ch == '+') else {
-                continue;
-            };
-            word_pred.retain(|ch| *ch != '+');
-            let cased: Vec<char> = found
-                .word
-                .iter()
-                .zip(&word_pred)
-                .map(|(original, predicted)| {
-                    if original.is_lowercase() {
-                        predicted.to_lowercase().next().unwrap_or(*predicted)
-                    } else {
-                        predicted.to_uppercase().next().unwrap_or(*predicted)
-                    }
-                })
-                .collect();
-            let mut replacement = cased;
-            if (n_vowels > 1 || stress_single_vowel)
-                && put_stress
-                && stress_idx <= replacement.len()
-            {
-                replacement.insert(stress_idx, '+');
+            if stress_inserted {
                 offset += 1;
             }
             if start >= 0 && (end as usize) <= result.len() {
@@ -229,13 +158,64 @@ impl HomoSolver {
         Ok(result)
     }
 
+    /// Ersatz für `found` nach Variante `pred` seines Wörterbucheintrags. Das Flag
+    /// meldet, ob eine Betonungsmarke `+` eingefügt wurde (verschiebt spätere Spannen).
+    /// `None`, wenn die Variante oder ihre Betonungsmarke fehlt.
+    fn variant_replacement(
+        &self,
+        found: &Found,
+        pred: u32,
+        options: AccentOptions,
+    ) -> Option<(Vec<char>, bool)> {
+        let AccentOptions {
+            put_stress,
+            put_yo,
+            stress_single_vowel,
+        } = options;
+        let key = found.word.iter().collect::<String>().to_lowercase();
+        let variant = self.homodict.get(&key)?.get(pred as usize)?;
+        let mut word_pred: Vec<char> = if put_yo {
+            variant.chars().collect()
+        } else {
+            variant
+                .chars()
+                .map(|ch| if ch == 'ё' { 'е' } else { ch })
+                .collect()
+        };
+        let n_vowels = word_pred
+            .iter()
+            .filter(|ch| crate::text::accentor::is_vowel(**ch))
+            .count();
+        let stress_idx = word_pred.iter().position(|ch| *ch == '+')?;
+        word_pred.retain(|ch| *ch != '+');
+        let mut replacement: Vec<char> = found
+            .word
+            .iter()
+            .zip(&word_pred)
+            .map(|(original, predicted)| {
+                if original.is_lowercase() {
+                    predicted.to_lowercase().next().unwrap_or(*predicted)
+                } else {
+                    predicted.to_uppercase().next().unwrap_or(*predicted)
+                }
+            })
+            .collect();
+        let insert_stress =
+            (n_vowels > 1 || stress_single_vowel) && put_stress && stress_idx <= replacement.len();
+        if insert_stress {
+            replacement.insert(stress_idx, '+');
+        }
+        Some((replacement, insert_stress))
+    }
+
     /// Logits für alle Homographen eines Satzes, `None` ohne Treffer.
     ///
     /// # Errors
     ///
     /// Gibt einen Fehler zurück, wenn BERT oder der Kopf fehlschlägt ([`Error::Pipeline`])
     /// oder das Vokabular die Homograph-Marker nicht enthält ([`Error::Model`]).
-    pub fn logits(&self, sentence: &[char]) -> Result<Option<Tensor>> {
+    #[cfg(feature = "test-util")]
+    pub(crate) fn logits(&self, sentence: &[char]) -> Result<Option<Tensor>> {
         let matches = self.find_matches(sentence);
         if matches.is_empty() {
             return Ok(None);
@@ -254,11 +234,11 @@ impl HomoSolver {
             let start = ids
                 .iter()
                 .position(|id| *id == self.tokenizer.config().homo_start_id)
-                .ok_or_else(|| Error::Model("HOMO-Startmarker fehlt".into()))?;
+                .ok_or_else(|| Error::model_msg("HOMO-Startmarker fehlt"))?;
             let end = ids
                 .iter()
                 .position(|id| *id == self.tokenizer.config().homo_end_id)
-                .ok_or_else(|| Error::Model("HOMO-Endmarker fehlt".into()))?;
+                .ok_or_else(|| Error::model_msg("HOMO-Endmarker fehlt"))?;
             ids_batch.push(ids);
             starts.push(start);
             ends.push(end);
@@ -349,7 +329,7 @@ impl HomoSolver {
             Tensor::from_vec(weights, (batch, 2, max_len), device).map_err(stage("homosolver"))?;
         let pooled = weights.matmul(&hidden).map_err(stage("homosolver"))?;
         let features = pooled
-            .reshape((batch, 2 * self.bert_config.hidden_size))
+            .reshape((batch, 2 * self.hidden_size))
             .map_err(stage("homosolver"))?;
         self.head0
             .forward(&features)

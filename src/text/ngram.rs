@@ -39,13 +39,13 @@ impl Linear {
         let w = tensor_vec(tensors, &format!("{prefix}.weight"))?;
         let b = tensor_vec(tensors, &format!("{prefix}.bias"))?;
         if w.len() != out * in_dim {
-            return Err(Error::Model(format!(
+            return Err(Error::model_msg(format!(
                 "{prefix}.weight: {} Werte statt {out}x{in_dim}",
                 w.len()
             )));
         }
         if b.len() != out {
-            return Err(Error::Model(format!(
+            return Err(Error::model_msg(format!(
                 "{prefix}.bias: {} Werte statt {out}",
                 b.len()
             )));
@@ -62,10 +62,10 @@ impl Linear {
     pub(crate) fn load_auto(tensors: &HashMap<String, Tensor>, prefix: &str) -> Result<Self> {
         let tensor = tensors
             .get(&format!("{prefix}.weight"))
-            .ok_or_else(|| Error::Model(format!("{prefix}.weight fehlt")))?;
+            .ok_or_else(|| Error::model_msg(format!("{prefix}.weight fehlt")))?;
         let (out, in_dim) = tensor
             .dims2()
-            .map_err(|error| Error::Model(format!("{prefix}.weight: {error}")))?;
+            .map_err(|error| Error::model(format!("{prefix}.weight"), error))?;
         Self::load(tensors, prefix, out, in_dim)
     }
 
@@ -110,11 +110,11 @@ impl Linear {
 pub(crate) fn tensor_vec(tensors: &HashMap<String, Tensor>, name: &str) -> Result<Vec<f32>> {
     let tensor = tensors
         .get(name)
-        .ok_or_else(|| Error::Model(format!("{name} fehlt in den Akzentor-Gewichten")))?;
+        .ok_or_else(|| Error::model_msg(format!("{name} fehlt in den Akzentor-Gewichten")))?;
     tensor
         .flatten_all()
         .and_then(|tensor| tensor.to_vec1::<f32>())
-        .map_err(|error| Error::Model(format!("{name}: {error}")))
+        .map_err(|error| Error::model(name, error))
 }
 
 /// MLP mit ReLU zwischen den Schichten, aber ohne Aktivierung am Ausgang.
@@ -155,6 +155,8 @@ pub(crate) struct NgramEmbedding {
     weights: Vec<f32>,
     dim: usize,
     unk: u32,
+    /// Länge des längsten Schlüssels in Zeichen; längere n-Gramme können nie treffen.
+    max_key_chars: usize,
 }
 
 impl NgramEmbedding {
@@ -174,7 +176,7 @@ impl NgramEmbedding {
     ) -> Result<Self> {
         let weights = tensor_vec(tensors, &format!("{prefix}.weight"))?;
         if weights.len() != count * dim {
-            return Err(Error::Model(format!(
+            return Err(Error::model_msg(format!(
                 "{prefix}.weight: {} Werte statt {count}x{dim}",
                 weights.len()
             )));
@@ -183,33 +185,41 @@ impl NgramEmbedding {
         let mut ngrams = HashMap::with_capacity(count);
         for (id, gram) in text.lines().enumerate() {
             if ngrams.insert(gram.to_string(), id as u32).is_some() {
-                return Err(Error::Model(format!(
+                return Err(Error::model_msg(format!(
                     "ngrams.txt: doppeltes n-Gramm {gram:?} in Zeile {}",
                     id + 1
                 )));
             }
         }
         if ngrams.len() != count {
-            return Err(Error::Model(format!(
+            return Err(Error::model_msg(format!(
                 "ngrams.txt: {} statt {count} Einträge",
                 ngrams.len()
             )));
         }
         let unk = *ngrams
             .get("UNK")
-            .ok_or_else(|| Error::Model("ngrams.txt: UNK fehlt".into()))?;
+            .ok_or_else(|| Error::model_msg("ngrams.txt: UNK fehlt"))?;
+        let max_key_chars = ngrams.keys().map(|k| k.chars().count()).max().unwrap_or(0);
         Ok(Self {
             ngrams,
             weights,
             dim,
             unk,
+            max_key_chars,
         })
     }
 
     /// `word_ngrams(word, 1, len+3)`, dann `embedding_bag(mean)`. `UNK` wird nur
-    /// verwendet, wenn kein n-Gramm im Vokabular liegt.
+    /// verwendet, wenn kein n-Gramm im Vokabular liegt. Die Suche endet bei der Länge
+    /// des längsten Schlüssels; die Reihenfolge der IDs bleibt unverändert.
     pub(crate) fn word_vector(&self, word: &[char]) -> Vec<f32> {
-        let max_len = word.len() + 3;
+        self.word_vector_capped(word, self.max_key_chars)
+    }
+
+    /// Wie [`Self::word_vector`], mit `cap` als Obergrenze der n-Gramm-Länge.
+    fn word_vector_capped(&self, word: &[char], cap: usize) -> Vec<f32> {
+        let max_len = (word.len() + 3).min(cap);
         let mut wrapped = Vec::with_capacity(word.len() + 2);
         wrapped.push('<');
         wrapped.extend_from_slice(word);
@@ -249,5 +259,55 @@ impl NgramEmbedding {
             *value /= count;
         }
         mean
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Kleine Tabelle mit Schlüsseln bis vier Zeichen, inklusive `UNK`.
+    fn fixture() -> NgramEmbedding {
+        let keys = [
+            "UNK", "<", "a", "b", "<a", "ab", "ba", "b>", "<ab", "aba", "bab", "<aba", "abab",
+            "baba", "aba>",
+        ];
+        let ngrams: HashMap<String, u32> = keys
+            .iter()
+            .enumerate()
+            .map(|(id, key)| ((*key).to_string(), id as u32))
+            .collect();
+        let dim = 3;
+        let weights = (0..keys.len() * dim)
+            .map(|i| ((i * 7 + 3) % 11) as f32 * 0.25)
+            .collect();
+        let max_key_chars = keys.iter().map(|k| k.chars().count()).max().unwrap_or(0);
+        NgramEmbedding {
+            ngrams,
+            weights,
+            dim,
+            unk: 0,
+            max_key_chars,
+        }
+    }
+
+    #[test]
+    fn capped_probing_matches_uncapped() {
+        let table = fixture();
+        assert_eq!(table.max_key_chars, 4, "längster Schlüssel");
+        for text in [
+            "",
+            "a",
+            "ab",
+            "abab",
+            "ababababababababab",
+            "zzzz",
+            "abzbabab",
+        ] {
+            let word: Vec<char> = text.chars().collect();
+            let capped = table.word_vector(&word);
+            let uncapped = table.word_vector_capped(&word, usize::MAX);
+            assert_eq!(capped, uncapped, "Wort {text:?}");
+        }
     }
 }

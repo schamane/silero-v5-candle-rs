@@ -6,7 +6,7 @@ use candle_nn::{LayerNorm, Linear, Module, VarBuilder};
 
 use super::transformer::{FftBlock, PositionalEncoding};
 
-pub struct HourGlass {
+pub(crate) struct HourGlass {
     pos_encoder: PositionalEncoding,
     pre: FftBlock,
     shorten: FftBlock,
@@ -16,7 +16,7 @@ pub struct HourGlass {
 }
 
 impl HourGlass {
-    pub fn load(vb: VarBuilder) -> Result<Self> {
+    pub(crate) fn load(vb: VarBuilder) -> Result<Self> {
         let pos_encoder = PositionalEncoding::load(vb.pp("pos_encoder"), 128)?;
         let pre = FftBlock::load(vb.pp("pre_vanilla_layers.0"), 128, 512, 2, 1e-5)?;
         let shorten = FftBlock::load(vb.pp("shorten_layers.1"), 128, 512, 2, 1e-5)?;
@@ -33,7 +33,7 @@ impl HourGlass {
         })
     }
 
-    pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
+    pub(crate) fn forward(&self, x: &Tensor) -> Result<Tensor> {
         let original = x.dim(1)?;
         let x = self.pos_encoder.forward(x)?;
         let x = self.pre.forward(&x)?;

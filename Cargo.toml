@@ -33,6 +33,14 @@ publish = false
 default = ["metal"]
 # Apple-GPU-Backend. Ohne dieses Feature (oder ohne Metal-Gerät) rechnet alles auf der CPU.
 metal = ["candle-core/metal", "candle-nn/metal", "candle-transformers/metal"]
+# Optionale BLAS-Backends für die CPU (Apple Accelerate bzw. Intel MKL); nicht Standard.
+# Opt-in und nicht durch die Python-Goldens abgedeckt (BLAS-Rundung weicht ab).
+accelerate = ["candle-core/accelerate", "candle-nn/accelerate", "candle-transformers/accelerate"]
+mkl = ["candle-core/mkl", "candle-nn/mkl", "candle-transformers/mkl"]
+
+# Zwischenstände und Hilfen für die Golden-Tests (`Silero::debug_stages` und Verwandte).
+# Opt-in und nicht Teil der stabilen API; die Tests aktivieren es über die Selbst-Dev-Dependency.
+test-util = []
 
 [lints]
 workspace = true
@@ -49,8 +57,12 @@ path = "src/bin/silero.rs"
 candle-core = "0.11"
 candle-nn = "0.11"
 candle-transformers = "0.11"
+rayon = "1"
 realfft = "3.5"
-rustfft = "6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
+
+[dev-dependencies]
+# Aktiviert `test-util` für Tests und Beispiele, ohne die Standard-Features zu ändern.
+silero-v5-candle-rs = { path = ".", default-features = false, features = ["test-util"] }

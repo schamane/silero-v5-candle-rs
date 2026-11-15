@@ -25,7 +25,7 @@ const UNK_TOKEN: &str = "[UNK]";
 /// Standardwert von `max_input_chars_per_word` im BERT-Tokenizer.
 const MAX_WORD_CHARS: usize = 100;
 
-pub struct BertTokenizer {
+pub(crate) struct BertTokenizer {
     vocab: HashMap<String, u32>,
     never_split: HashSet<String>,
     /// ID von [`UNK_TOKEN`] aus dem Vokabular, einmal beim Laden bestimmt.
@@ -40,13 +40,13 @@ impl BertTokenizer {
     ///
     /// Gibt einen Fehler zurück, wenn die Datei fehlt, ein Token doppelt vorkommt,
     /// die Anzahl der Tokens nicht zu `vocab_size` passt oder `[UNK]` fehlt.
-    pub fn load(dir: &Path, config: TokenizerConfig, vocab_size: usize) -> Result<Self> {
+    pub(crate) fn load(dir: &Path, config: TokenizerConfig, vocab_size: usize) -> Result<Self> {
         let path = dir.join("bert_vocab.txt");
         let text = std::fs::read_to_string(&path).map_err(io_at(path.clone()))?;
         let mut vocab = HashMap::with_capacity(vocab_size);
         for (id, token) in text.lines().enumerate() {
             if vocab.insert(token.to_string(), id as u32).is_some() {
-                return Err(Error::Model(format!(
+                return Err(Error::model_msg(format!(
                     "{}: doppeltes Token {token:?} in Zeile {}",
                     path.display(),
                     id + 1
@@ -54,14 +54,14 @@ impl BertTokenizer {
             }
         }
         if vocab.len() != vocab_size {
-            return Err(Error::Model(format!(
+            return Err(Error::model_msg(format!(
                 "{}: {} statt {vocab_size} Tokens",
                 path.display(),
                 vocab.len()
             )));
         }
         let unk_id = vocab.get(UNK_TOKEN).copied().ok_or_else(|| {
-            Error::Model(format!(
+            Error::model_msg(format!(
                 "{}: {UNK_TOKEN} fehlt im Vokabular",
                 path.display()
             ))
@@ -80,7 +80,7 @@ impl BertTokenizer {
     }
 
     /// Kodiert vorbereiteten Text als `[CLS] ... [SEP]`-Sequenz von Vokabular-IDs.
-    pub fn encode(&self, text: &str) -> Vec<u32> {
+    pub(crate) fn encode(&self, text: &str) -> Vec<u32> {
         let tokens = self.basic_tokenize(text);
         let mut ids = vec![self.config.cls_token_id];
         ids.extend(self.wordpiece(&tokens));

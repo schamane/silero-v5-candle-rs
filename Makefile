@@ -9,6 +9,6 @@ lint-rust:
 	cargo clippy --workspace --all-targets --all-features -- -D warnings
 
 test:
-	cargo test --workspace
+	cargo test --workspace --all-targets
 
 check: lint-rust test

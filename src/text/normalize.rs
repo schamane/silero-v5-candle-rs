@@ -7,17 +7,22 @@
 use crate::config::Config;
 
 /// Ergebnis von `prepare_text_input`.
+#[cfg_attr(
+    not(feature = "test-util"),
+    expect(unreachable_pub, reason = "nur mit `test-util` am Crate-Root sichtbar")
+)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreparedText {
     /// Gefilterter Text mit `^`-Sternsyntax.
     pub sentence: Vec<char>,
-    /// Nur `[а-я\- ]`.
+    /// Nur für Tests (`tests/golden.rs`); die Pipeline liest dieses Feld nicht.
+    /// Enthält nur `[а-я\- ]`.
     pub clean: Vec<char>,
     pub has_text: bool,
 }
 
 /// `prepare_text_input` für Klartext (kein Phonem-Modus).
-pub fn prepare_text_input(config: &Config, text: &str) -> PreparedText {
+pub(crate) fn prepare_text_input(config: &Config, text: &str) -> PreparedText {
     let allowed = config.allowed_chars();
     // Kleinschreibung, Zeichenersetzung und Filter wirken jeweils auf ein Zeichen
     // ohne Bezug zu den Nachbarn; ein Durchlauf liefert daher dieselbe Folge.
@@ -59,7 +64,7 @@ pub fn prepare_text_input(config: &Config, text: &str) -> PreparedText {
 
 /// `clean_star_text`: kollabiert Whitespace, entfernt Leerzeichen um `^` und
 /// fasst `^^` zusammen.
-pub fn clean_star_text(text: &str) -> Vec<char> {
+pub(crate) fn clean_star_text(text: &str) -> Vec<char> {
     let mut work = String::with_capacity(text.len() + 1);
     for ch in text.chars() {
         if ch == '^' {
@@ -113,6 +118,7 @@ fn collapse_carets(text: &str) -> String {
 
 /// Satzaufteilung in Chunks (400 Zeichen, Codepoints); `scripts/export_silero.py`
 /// spiegelt sie für die Goldens.
+#[must_use]
 pub fn split_chunks(text: &str, limit: usize) -> Vec<String> {
     let limit = limit.max(3);
     let mut chunks = Vec::new();
@@ -204,6 +210,7 @@ fn last_substring(chars: &[char], needle: &str, limit: usize) -> usize {
 }
 
 /// Enthält `text` ein Zeichen, das `has_text` zählt (`а-я` oder `ё` nach `lower()`)?
+#[must_use]
 pub fn has_cyrillic(text: &str) -> bool {
     text.chars().any(|ch| ch.to_lowercase().any(is_text_char))
 }

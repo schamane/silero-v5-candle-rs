@@ -1,16 +1,15 @@
 //! Akzentor: fastText-artiges n-Gramm-Embedding plus zwei MLP-Köpfe und die
 //! Regelkette aus `AccentorNgram.__call__`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::Path;
 
-use crate::config::Config;
 use crate::error::io_at;
 use crate::text::ngram::{Linear, NgramEmbedding, run_mlp, softmax_argmax};
-use crate::text::normalize::prepare_text_input;
+use crate::text::tokens::{Token, hyphen_parts, lower_chars, ordinal_positions};
 use crate::{Error, Result};
 
-pub fn is_vowel(ch: char) -> bool {
+pub(crate) fn is_vowel(ch: char) -> bool {
     VOWELS.contains(&ch)
 }
 
@@ -30,7 +29,7 @@ const EMBEDDING_DIM: usize = 16;
 /// nutzt.
 #[derive(Debug, Clone, Copy)]
 #[non_exhaustive]
-pub struct AccentOptions {
+pub(crate) struct AccentOptions {
     /// Betonung setzen.
     pub put_stress: bool,
     /// `ё` setzen.
@@ -49,7 +48,7 @@ impl Default for AccentOptions {
     }
 }
 
-pub struct Accentor {
+pub(crate) struct Accentor {
     embedding: NgramEmbedding,
     stress: Vec<Linear>,
     yo: Vec<Linear>,
@@ -67,10 +66,10 @@ impl Accentor {
     /// Gibt [`Error::Io`] zurück, wenn eine Datei nicht gelesen werden kann, und sonst
     /// [`Error::Model`], wenn eine Datei fehlt, eine Form oder Anzahl nicht passt oder ein
     /// n-Gramm beziehungsweise Ausnahmewort doppelt vorkommt.
-    pub fn load(dir: &Path) -> Result<Self> {
+    pub(crate) fn load(dir: &Path) -> Result<Self> {
         let path = dir.join("accentor.safetensors");
         let tensors = candle_core::safetensors::load(&path, &candle_core::Device::Cpu)
-            .map_err(|e| Error::Model(format!("{}: {e}", path.display())))?;
+            .map_err(|e| Error::model(path.display().to_string(), e))?;
         let ngrams_path = dir.join("ngrams.txt");
         let embedding = NgramEmbedding::load(
             &ngrams_path,
@@ -102,14 +101,14 @@ impl Accentor {
             if let (false, Some(stress), Some(yo)) = (word.is_empty(), stress, yo)
                 && exceptions.insert(word.to_string(), (stress, yo)).is_some()
             {
-                return Err(Error::Model(format!(
+                return Err(Error::model_msg(format!(
                     "exceptions.tsv: doppeltes Wort {word:?} in Zeile {}",
                     line_no + 1
                 )));
             }
         }
         if exceptions.len() != EXCEPTION_COUNT {
-            return Err(Error::Model(format!(
+            return Err(Error::model_msg(format!(
                 "exceptions.tsv: {} statt {EXCEPTION_COUNT} Einträge",
                 exceptions.len()
             )));
@@ -123,7 +122,7 @@ impl Accentor {
     }
 
     /// Logits beider Köpfe für die maskierten Wörter.
-    pub fn logits(&self, words: &[Vec<char>]) -> Vec<(Vec<f32>, Vec<f32>)> {
+    pub(crate) fn logits(&self, words: &[Vec<char>]) -> Vec<(Vec<f32>, Vec<f32>)> {
         words
             .iter()
             .map(|word| {
@@ -134,17 +133,11 @@ impl Accentor {
     }
 
     /// Portierung von `AccentorNgram.__call__` für eine Zeile.
-    pub fn accent(
-        &self,
-        sentence: &[char],
-        options: AccentOptions,
-        skip_stress_words: &HashSet<String>,
-        skip_yo_words: &HashSet<String>,
-    ) -> Vec<char> {
+    pub(crate) fn accent(&self, sentence: &[char], options: AccentOptions) -> Vec<char> {
         if !(options.put_stress || options.put_yo) {
             return sentence.to_vec();
         }
-        let tokens = self.tokenize(sentence);
+        let tokens = Self::tokenize(sentence);
         let masked: Vec<Vec<char>> = tokens
             .iter()
             .filter(|token| token.process)
@@ -163,14 +156,7 @@ impl Accentor {
                 output.push(token.raw.clone());
                 continue;
             };
-            output.push(self.apply_word(
-                token,
-                stress_logits,
-                yo_logits,
-                options,
-                skip_stress_words,
-                skip_yo_words,
-            ));
+            output.push(self.apply_word(token, (&stress_logits, &yo_logits), options));
         }
         output.concat()
     }
@@ -178,100 +164,25 @@ impl Accentor {
     fn apply_word(
         &self,
         token: &Token,
-        stress_logits: Vec<f32>,
-        yo_logits: Vec<f32>,
+        (stress_logits, yo_logits): (&[f32], &[f32]),
         options: AccentOptions,
-        skip_stress_words: &HashSet<String>,
-        skip_yo_words: &HashSet<String>,
     ) -> Vec<char> {
-        let AccentOptions {
-            put_stress,
-            put_yo,
-            stress_single_vowel,
-        } = options;
-        let (stress_probs, stress_pred) = softmax_argmax(&stress_logits);
-        let (yo_probs, yo_pred) = softmax_argmax(&yo_logits);
+        let word = WordCase::new(token);
+        if word.have_stress() && word.have_yo() {
+            return word.raw;
+        }
+        if !word.have_stress() && word.have_yo() && options.put_stress {
+            return word.stress_yo_words(options);
+        }
         let clean_word: String = token.clean.iter().collect();
-        let clean_yo = clean_word.replace('ё', "е");
-        let mut raw_word = token.raw.clone();
-        // Zeichenweise Kleinschreibung: genau ein Zeichen je Eingabezeichen, damit die
-        // Indizes von `raw_lower` auch für `raw_word` gelten (`İ` wird sonst zu zwei Zeichen).
-        let raw_lower: Vec<char> = raw_word
-            .iter()
-            .map(|ch| ch.to_lowercase().next().unwrap_or(*ch))
-            .collect();
-        let have_stress = raw_lower.contains(&'+');
-        let have_yo = raw_lower.contains(&'ё');
-
-        if have_stress && have_yo {
-            return raw_word;
-        }
-        if !have_stress && have_yo && put_stress {
-            let vowel_count = raw_lower.iter().filter(|ch| VOWELS.contains(ch)).count();
-            if (vowel_count == 1 && !stress_single_vowel) || skip_stress_words.contains(&clean_yo) {
-                return raw_word;
-            }
-            let positions: Vec<usize> = raw_lower
-                .iter()
-                .enumerate()
-                .filter(|(_, ch)| **ch == 'ё')
-                .map(|(index, _)| index)
-                .collect();
-            for (offset, position) in positions.into_iter().enumerate() {
-                raw_word.insert(position + offset, '+');
-            }
-            return raw_word;
-        }
-
         if let Some((exc_stress, exc_yo)) = self.exceptions.get(&clean_word) {
-            return accentuate_exception(&raw_word, *exc_stress, *exc_yo, have_stress);
+            let have_stress = word.have_stress();
+            return accentuate_exception(&word.raw, *exc_stress, *exc_yo, have_stress);
         }
-
-        let mut stressed_vowel_ids = vec![stress_pred as i32];
-        let stress_threshold = if put_stress { 0.5 } else { 1.0 };
-        let set_stress = stress_probs[stress_pred] > stress_threshold
-            && !have_stress
-            && !skip_stress_words.contains(&clean_yo);
-        let yo_vowel_ids = vec![yo_pred as i32];
-        let yo_threshold = if put_yo { 0.5 } else { 1.0 };
-        let set_yo = yo_probs[yo_pred] > yo_threshold && !skip_yo_words.contains(&clean_yo);
-
-        if have_stress {
-            stressed_vowel_ids = raw_lower
-                .split(|ch| *ch == '+')
-                .map(|part| part.iter().filter(|ch| VOWELS.contains(ch)).count() as i32)
-                .collect();
-        }
-
-        let (mut stress_positions, yo_positions, num_vowels, first_vowel_pos) =
-            get_positions(&raw_lower, &stressed_vowel_ids, &yo_vowel_ids);
-        if num_vowels == 0 {
-            return raw_word;
-        }
-        for yo_pos in &yo_positions {
-            if stress_positions.contains(yo_pos) && set_yo && raw_lower[*yo_pos] == 'е' {
-                let replacement = if raw_word[*yo_pos].is_lowercase() {
-                    'ё'
-                } else {
-                    'Ё'
-                };
-                raw_word[*yo_pos] = replacement;
-            }
-        }
-        let mut set_stress = set_stress;
-        if num_vowels == 1 {
-            stress_positions = vec![first_vowel_pos];
-            set_stress = stress_single_vowel && put_stress;
-        }
-        if !have_stress && set_stress {
-            for (offset, position) in stress_positions.into_iter().enumerate() {
-                raw_word.insert(position + offset, '+');
-            }
-        }
-        raw_word
+        word.predicted(stress_logits, yo_logits, options)
     }
 
-    fn tokenize(&self, sentence: &[char]) -> Vec<Token> {
+    fn tokenize(sentence: &[char]) -> Vec<Token> {
         let mut tokens = Vec::new();
         let mut i = 0;
         while i < sentence.len() {
@@ -292,13 +203,7 @@ impl Accentor {
                 i += 1;
             }
             let word = &sentence[start..i];
-            let parts: Vec<Vec<char>> = split_on(word, '-');
-            let last = parts.len() - 1;
-            for (index, part) in parts.iter().enumerate() {
-                let mut raw = part.clone();
-                if index < last {
-                    raw.push('-');
-                }
+            for (raw, is_last) in hyphen_parts(word) {
                 let clean: Vec<char> = raw
                     .iter()
                     .flat_map(|ch| ch.to_lowercase())
@@ -306,8 +211,8 @@ impl Accentor {
                     .collect();
                 // Vergleich in Kleinschreibung. `prepare_text_input` schreibt die Eingabe
                 // bereits klein, daher ändert das für die Pipeline nichts.
-                let stop = index == last && {
-                    let lowered: String = part.iter().flat_map(|ch| ch.to_lowercase()).collect();
+                let stop = is_last && {
+                    let lowered: String = raw.iter().flat_map(|ch| ch.to_lowercase()).collect();
                     STOP_WORDS.contains(&lowered.as_str())
                 };
                 tokens.push(Token {
@@ -321,25 +226,105 @@ impl Accentor {
     }
 }
 
-struct Token {
+/// Ein Wort in Originalschreibung und in zeichenweiser Kleinschreibung.
+struct WordCase {
     raw: Vec<char>,
-    clean: Vec<char>,
-    process: bool,
+    /// Genau ein Zeichen je Eingabezeichen, damit die Indizes auch für `raw` gelten
+    /// (`İ` wird sonst zu zwei Zeichen).
+    lower: Vec<char>,
 }
 
-fn split_on(word: &[char], sep: char) -> Vec<Vec<char>> {
-    let mut parts = Vec::new();
-    let mut current = Vec::new();
-    for ch in word {
-        if *ch == sep {
-            parts.push(current);
-            current = Vec::new();
-        } else {
-            current.push(*ch);
-        }
+impl WordCase {
+    fn new(token: &Token) -> Self {
+        let raw = token.raw.clone();
+        let lower = lower_chars(&raw);
+        Self { raw, lower }
     }
-    parts.push(current);
-    parts
+
+    fn have_stress(&self) -> bool {
+        self.lower.contains(&'+')
+    }
+
+    fn have_yo(&self) -> bool {
+        self.lower.contains(&'ё')
+    }
+
+    /// Wort mit `ё` ohne Betonungsmarke: die Marke kommt vor jedes `ё`.
+    fn stress_yo_words(mut self, options: AccentOptions) -> Vec<char> {
+        let vowel_count = self.lower.iter().filter(|ch| VOWELS.contains(ch)).count();
+        if vowel_count == 1 && !options.stress_single_vowel {
+            return self.raw;
+        }
+        let positions: Vec<usize> = self
+            .lower
+            .iter()
+            .enumerate()
+            .filter(|(_, ch)| **ch == 'ё')
+            .map(|(index, _)| index)
+            .collect();
+        for (offset, position) in positions.into_iter().enumerate() {
+            self.raw.insert(position + offset, '+');
+        }
+        self.raw
+    }
+
+    /// Setzt `ё` und Betonung nach den Vorhersagen beider Köpfe.
+    fn predicted(
+        mut self,
+        stress_logits: &[f32],
+        yo_logits: &[f32],
+        options: AccentOptions,
+    ) -> Vec<char> {
+        let AccentOptions {
+            put_stress,
+            put_yo,
+            stress_single_vowel,
+        } = options;
+        let have_stress = self.have_stress();
+        let (stress_probs, stress_pred) = softmax_argmax(stress_logits);
+        let (yo_probs, yo_pred) = softmax_argmax(yo_logits);
+        let mut stressed_vowel_ids = vec![stress_pred as i32];
+        let stress_threshold = if put_stress { 0.5 } else { 1.0 };
+        let set_stress = stress_probs[stress_pred] > stress_threshold && !have_stress;
+        let yo_vowel_ids = vec![yo_pred as i32];
+        let yo_threshold = if put_yo { 0.5 } else { 1.0 };
+        let set_yo = yo_probs[yo_pred] > yo_threshold;
+
+        if have_stress {
+            stressed_vowel_ids = self
+                .lower
+                .split(|ch| *ch == '+')
+                .map(|part| part.iter().filter(|ch| VOWELS.contains(ch)).count() as i32)
+                .collect();
+        }
+
+        let (mut stress_positions, yo_positions, num_vowels, first_vowel_pos) =
+            get_positions(&self.lower, &stressed_vowel_ids, &yo_vowel_ids);
+        if num_vowels == 0 {
+            return self.raw;
+        }
+        for yo_pos in &yo_positions {
+            if stress_positions.contains(yo_pos) && set_yo && self.lower[*yo_pos] == 'е' {
+                let replacement = if self.raw[*yo_pos].is_lowercase() {
+                    'ё'
+                } else {
+                    'Ё'
+                };
+                self.raw[*yo_pos] = replacement;
+            }
+        }
+        let mut set_stress = set_stress;
+        if num_vowels == 1 {
+            stress_positions = vec![first_vowel_pos];
+            set_stress = stress_single_vowel && put_stress;
+        }
+        if !have_stress && set_stress {
+            for (offset, position) in stress_positions.into_iter().enumerate() {
+                self.raw.insert(position + offset, '+');
+            }
+        }
+        self.raw
+    }
 }
 
 fn get_positions(
@@ -359,11 +344,7 @@ fn get_positions(
         .filter(|(_, ch)| **ch == 'е')
         .map(|(index, _)| index)
         .collect();
-    let stress_positions = stressed_vowel_ids
-        .iter()
-        .filter(|idx| **idx >= 0 && (**idx as usize) < vowel_ids.len() && !vowel_ids.is_empty())
-        .map(|idx| vowel_ids[*idx as usize])
-        .collect();
+    let stress_positions = ordinal_positions(&vowel_ids, stressed_vowel_ids);
     let yo_positions = yo_vowel_ids
         .iter()
         .filter(|idx| **idx > 0 && ((**idx - 1) as usize) < ye_ids.len() && !ye_ids.is_empty())
@@ -415,27 +396,4 @@ fn accentuate_exception(
         }
         raw
     }
-}
-
-/// Hilfsfunktion für Tests: derselbe Pfad wie `synthesize`, nur Text.
-///
-/// # Errors
-///
-/// Gibt [`Error::Input`] zurück, wenn der Text keine sprechbaren Zeichen enthält.
-pub fn accent_text(
-    config: &Config,
-    accentor: &Accentor,
-    text: &str,
-) -> Result<(Vec<char>, Vec<char>)> {
-    let prepared = prepare_text_input(config, text);
-    if !prepared.has_text {
-        return Err(Error::Input("text is empty".into()));
-    }
-    let accented = accentor.accent(
-        &prepared.sentence,
-        AccentOptions::default(),
-        &HashSet::new(),
-        &HashSet::new(),
-    );
-    Ok((prepared.sentence, accented))
 }

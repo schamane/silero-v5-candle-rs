@@ -1,31 +1,26 @@
 //! FastPitch-Transformatoren: PositionalEncoding, Aufmerksamkeit, FFTBlock.
 
 use candle_core::{Device, Result, Tensor};
-use candle_nn::{Conv1d, Conv1dConfig, LayerNorm, Module, VarBuilder, layer_norm};
+use candle_nn::{Conv1d, Conv1dConfig, LayerNorm, Linear, Module, VarBuilder, layer_norm};
 
 use crate::config::MAX_POSITIONS;
 
-pub struct PositionalEncoding {
+pub(crate) struct PositionalEncoding {
     scale: Tensor,
     pe: Tensor,
-    max_positions: usize,
 }
 
 impl PositionalEncoding {
-    pub fn load(vb: VarBuilder, dim: usize) -> Result<Self> {
+    pub(crate) fn load(vb: VarBuilder, dim: usize) -> Result<Self> {
         let scale = vb.get(1, "scale")?;
         let pe = vb.get((MAX_POSITIONS, 1, dim), "pe")?.squeeze(1)?;
-        Ok(Self {
-            scale,
-            pe,
-            max_positions: MAX_POSITIONS,
-        })
+        Ok(Self { scale, pe })
     }
 
     /// `x + scale * pe[:T]`; `x` ist `[1, T, dim]`.
-    pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
+    pub(crate) fn forward(&self, x: &Tensor) -> Result<Tensor> {
         let t = x.dim(1)?;
-        if t > self.max_positions {
+        if t > MAX_POSITIONS {
             candle_core::bail!("Sequenz zu lang: {t} > {MAX_POSITIONS} Positionen");
         }
         let pe = self.pe.narrow(0, 0, t)?.unsqueeze(0)?;
@@ -34,7 +29,7 @@ impl PositionalEncoding {
     }
 }
 
-pub struct MultiHeadAttention {
+pub(crate) struct MultiHeadAttention {
     q_w: Tensor,
     q_b: Tensor,
     k_w: Tensor,
@@ -48,7 +43,7 @@ pub struct MultiHeadAttention {
 }
 
 impl MultiHeadAttention {
-    pub fn load(vb: VarBuilder, dim: usize, heads: usize) -> Result<Self> {
+    pub(crate) fn load(vb: VarBuilder, dim: usize, heads: usize) -> Result<Self> {
         let weight = vb.get((3 * dim, dim), "in_proj_weight")?;
         let bias = vb.get(3 * dim, "in_proj_bias")?;
         let q_w = weight.narrow(0, 0, dim)?.contiguous()?;
@@ -78,7 +73,7 @@ impl MultiHeadAttention {
     }
 
     /// `x` ist `[1, T, dim]`, die Padding-Maske ist bei Batch 1 leer.
-    pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
+    pub(crate) fn forward(&self, x: &Tensor) -> Result<Tensor> {
         let (batch, len, dim) = x.dims3()?;
         let q = Self::linear(x, &self.q_w, &self.q_b)?;
         let k = Self::linear(x, &self.k_w, &self.k_b)?;
@@ -96,7 +91,8 @@ impl MultiHeadAttention {
         let v = split(&v)?;
         let scale = (self.head_dim as f64).sqrt();
         let q = (q / scale)?;
-        let scores = q.matmul(&k.transpose(2, 3)?)?;
+        // Accelerate/MKL verlangen contiguous Operanden (`MatMulUnexpectedStriding`).
+        let scores = q.matmul(&k.transpose(2, 3)?.contiguous()?)?;
         let scores = candle_nn::ops::softmax_last_dim(&scores)?;
         let context = scores.matmul(&v)?;
         let context = context
@@ -107,16 +103,23 @@ impl MultiHeadAttention {
     }
 }
 
-pub struct FftBlock {
+pub(crate) struct FftBlock {
     attention: MultiHeadAttention,
     conv1: Conv1d,
-    conv2: Conv1d,
+    /// Faltung mit Kernelgröße 1, als Matmul auf NTC-Layout.
+    conv2: Linear,
     norm1: LayerNorm,
     norm2: LayerNorm,
 }
 
 impl FftBlock {
-    pub fn load(vb: VarBuilder, dim: usize, ffn: usize, heads: usize, eps: f64) -> Result<Self> {
+    pub(crate) fn load(
+        vb: VarBuilder,
+        dim: usize,
+        ffn: usize,
+        heads: usize,
+        eps: f64,
+    ) -> Result<Self> {
         let attention = MultiHeadAttention::load(vb.pp("self_attn"), dim, heads)?;
         let conv1 = candle_nn::conv1d(
             dim,
@@ -128,7 +131,10 @@ impl FftBlock {
             },
             vb.pp("conv1"),
         )?;
-        let conv2 = candle_nn::conv1d(ffn, dim, 1, Conv1dConfig::default(), vb.pp("conv2"))?;
+        let conv2 = Linear::new(
+            vb.pp("conv2").get((dim, ffn, 1), "weight")?.squeeze(2)?,
+            Some(vb.pp("conv2").get(dim, "bias")?),
+        );
         let norm1 = layer_norm(dim, eps, vb.pp("norm1"))?;
         let norm2 = layer_norm(dim, eps, vb.pp("norm2"))?;
         Ok(Self {
@@ -141,25 +147,24 @@ impl FftBlock {
     }
 
     /// Nur der normale Pfad: `pitch_pred` ist in allen Blöcken `False`.
-    pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
+    pub(crate) fn forward(&self, x: &Tensor) -> Result<Tensor> {
         let attention = self.attention.forward(x)?;
         let y = self.norm1.forward(&x.add(&attention)?)?;
         let conv = y.transpose(1, 2)?;
         let conv = self.conv1.forward(&conv)?.relu()?;
-        let conv = self.conv2.forward(&conv)?;
-        let conv = conv.transpose(1, 2)?;
+        let conv = self.conv2.forward(&conv.transpose(1, 2)?)?;
         self.norm2.forward(&y.add(&conv)?)
     }
 }
 
-pub struct ForwardTransformer {
+pub(crate) struct ForwardTransformer {
     pos_encoder: PositionalEncoding,
     layers: Vec<FftBlock>,
     norm: LayerNorm,
 }
 
 impl ForwardTransformer {
-    pub fn load(
+    pub(crate) fn load(
         vb: VarBuilder,
         dim: usize,
         ffn: usize,
@@ -186,7 +191,7 @@ impl ForwardTransformer {
         })
     }
 
-    pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
+    pub(crate) fn forward(&self, x: &Tensor) -> Result<Tensor> {
         let mut x = self.pos_encoder.forward(x)?;
         for layer in &self.layers {
             x = layer.forward(&x)?;
@@ -195,11 +200,23 @@ impl ForwardTransformer {
     }
 }
 
-pub fn embedding_table(vb: VarBuilder, rows: usize, dim: usize) -> Result<Tensor> {
+pub(crate) fn embedding_table(vb: VarBuilder, rows: usize, dim: usize) -> Result<Tensor> {
     vb.get((rows, dim), "weight")
 }
 
-pub fn embedding(weight: &Tensor, ids: &[u32], device: &Device) -> Result<Tensor> {
+pub(crate) fn embedding(weight: &Tensor, ids: &[u32], device: &Device) -> Result<Tensor> {
     let ids = Tensor::from_slice(ids, ids.len(), device)?;
     weight.embedding(&ids)
+}
+
+/// Zeile `speaker_id` der Sprecher-Tabelle als `[1, 1, dim]`, bereit zum Broadcast-Addieren.
+pub(crate) fn speaker_vector(
+    table: &Tensor,
+    speaker_id: u32,
+    dim: usize,
+    device: &Device,
+) -> Result<Tensor> {
+    table
+        .index_select(&Tensor::from_vec(vec![speaker_id], 1, device)?, 0)?
+        .reshape((1, 1, dim))
 }

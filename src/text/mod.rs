@@ -1,6 +1,7 @@
-pub mod accentor;
-pub mod accentor_uk;
-pub mod bert_tokenizer;
-pub mod homosolver;
+pub(crate) mod accentor;
+pub(crate) mod accentor_uk;
+pub(crate) mod bert_tokenizer;
+pub(crate) mod homosolver;
 mod ngram;
-pub mod normalize;
+pub(crate) mod normalize;
+mod tokens;

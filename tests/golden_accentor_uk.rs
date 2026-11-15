@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 
 use candle_core::{DType, Device};
-use silero_v5_candle::text::accentor_uk::{StressOptions, UkrainianAccentor};
+use silero_v5_candle::{StressOptions, UkrainianAccentor};
 
 fn model_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("models/silero-v5-cis-base-nostress")

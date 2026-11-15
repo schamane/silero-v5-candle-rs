@@ -1,4 +1,4 @@
-pub mod forward;
-pub mod hourglass;
-pub mod predictors;
-pub mod transformer;
+pub(crate) mod forward;
+pub(crate) mod hourglass;
+pub(crate) mod predictors;
+pub(crate) mod transformer;

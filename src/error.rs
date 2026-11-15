@@ -16,8 +16,14 @@ pub enum Error {
     },
     /// Das Modellverzeichnis ist unvollständig oder ungültig: fehlende oder falsch geformte
     /// Datei, falsche Konfiguration.
-    #[error("{0}")]
-    Model(String),
+    #[error("{context}")]
+    Model {
+        /// Was geprüft wurde, meist Dateiname oder Teilmodell.
+        context: String,
+        /// Ursache, falls die Meldung nicht schon alles sagt. Sie steht nur in der
+        /// `source()`-Kette, nicht in der Anzeige.
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
     /// Die Eingabe ist unbrauchbar: leerer Text, unbekannte Stimme, unbekanntes Symbol.
     #[error("{0}")]
     Input(String),
@@ -45,17 +51,23 @@ fn io_message(path: Option<&Path>) -> String {
     }
 }
 
-impl From<std::io::Error> for Error {
-    fn from(source: std::io::Error) -> Self {
-        Self::Io { path: None, source }
+impl Error {
+    /// [`Error::Model`] mit Kontext und der zugrunde liegenden Ursache.
+    pub(crate) fn model(
+        context: impl Into<String>,
+        source: impl std::error::Error + Send + Sync + 'static,
+    ) -> Self {
+        Self::Model {
+            context: context.into(),
+            source: Some(Box::new(source)),
+        }
     }
-}
 
-impl From<candle_core::Error> for Error {
-    fn from(source: candle_core::Error) -> Self {
-        Self::Pipeline {
-            stage: "tensor",
-            source,
+    /// [`Error::Model`] ohne weitere Ursache.
+    pub(crate) fn model_msg(context: impl Into<String>) -> Self {
+        Self::Model {
+            context: context.into(),
+            source: None,
         }
     }
 }

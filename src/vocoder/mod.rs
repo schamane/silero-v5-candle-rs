@@ -1,2 +1,2 @@
-pub mod convnext;
-pub mod istft;
+pub(crate) mod convnext;
+pub(crate) mod istft;

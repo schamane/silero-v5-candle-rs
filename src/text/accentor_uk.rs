@@ -7,12 +7,13 @@
 use std::path::Path;
 
 use crate::text::ngram::{Linear, NgramEmbedding, run_mlp, softmax_argmax};
+use crate::text::tokens::{Token, hyphen_parts, lower_chars, ordinal_positions};
 use crate::{Error, Result};
 
 /// Ukrainische Vokale in der Reihenfolge, in der das Modell sie zählt.
-pub const VOWELS: &str = "аеєиіїоуюя";
+pub(crate) const VOWELS: &str = "аеєиіїоуюя";
 /// Zeichen vor dem betonten Vokal, wie in `silero-stress`.
-pub const STRESS_TOKEN: char = '+';
+pub(crate) const STRESS_TOKEN: char = '+';
 
 /// Anzahl der Zeilen in `ngrams.txt`; das Akzentor-Paket legt sie fest.
 const NGRAM_COUNT: usize = 130_694;
@@ -60,7 +61,7 @@ impl UkrainianAccentor {
     pub fn load(dir: &Path) -> Result<Self> {
         let path = dir.join("accentor.safetensors");
         let tensors = candle_core::safetensors::load(&path, &candle_core::Device::Cpu)
-            .map_err(|error| Error::Model(format!("{}: {error}", path.display())))?;
+            .map_err(|error| Error::model(path.display().to_string(), error))?;
         let ngrams_path = dir.join("ngrams.txt");
         let embedding = NgramEmbedding::load(
             &ngrams_path,
@@ -76,14 +77,14 @@ impl UkrainianAccentor {
             Linear::load_auto(&tensors, "stress_clf.6")?,
         ];
         if stress[0].in_dim() != EMBEDDING_DIM {
-            return Err(Error::Model(format!(
+            return Err(Error::model_msg(format!(
                 "stress_clf.0: Eingabe {} statt {EMBEDDING_DIM}",
                 stress[0].in_dim()
             )));
         }
         for (index, pair) in stress.windows(2).enumerate() {
             if pair[0].out() != pair[1].in_dim() {
-                return Err(Error::Model(format!(
+                return Err(Error::model_msg(format!(
                     "stress_clf.{}: Ausgabe {} passt nicht zu stress_clf.{} Eingabe {}",
                     index * 2,
                     pair[0].out(),
@@ -93,7 +94,7 @@ impl UkrainianAccentor {
             }
         }
         if stress[3].out() != MAX_VOWELS {
-            return Err(Error::Model(format!(
+            return Err(Error::model_msg(format!(
                 "stress_clf.6: Ausgabe {} statt {MAX_VOWELS}",
                 stress[3].out()
             )));
@@ -103,6 +104,7 @@ impl UkrainianAccentor {
 
     /// Logits der Stress-Klassen für jedes Wort. Nur für die Golden-Tests.
     #[doc(hidden)]
+    #[must_use]
     pub fn logits(&self, words: &[Vec<char>]) -> Vec<Vec<f32>> {
         words
             .iter()
@@ -114,6 +116,7 @@ impl UkrainianAccentor {
     }
 
     /// Setzt `+` vor den betonten Vokal; vorhandene `+` bleiben unangetastet.
+    #[must_use]
     pub fn accent(&self, sentence: &[char], options: StressOptions) -> Vec<char> {
         let tokens = tokenize(sentence);
         let mut output = Vec::with_capacity(tokens.len());
@@ -133,14 +136,6 @@ impl UkrainianAccentor {
         }
         output.concat()
     }
-}
-
-/// Ein Wortstück oder ein Trenner; `raw` bleibt für die Ausgabe, `clean` geht ins Modell.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Token {
-    raw: Vec<char>,
-    clean: Vec<char>,
-    process: bool,
 }
 
 /// Portierung von `re.split(r'([\s.,!?;:<>=()/\\]+)', sentence)` und der
@@ -175,15 +170,9 @@ fn tokenize(sentence: &[char]) -> Vec<Token> {
     tokens
 }
 
-/// `word.split('-')`; alle Teile außer dem letzten behalten ihren Bindestrich.
+/// Zerlegt `word` an Bindestrichen; alle Teile außer dem letzten behalten ihren Bindestrich.
 fn push_word(word: &[char], tokens: &mut Vec<Token>) {
-    let parts = split_on(word, '-');
-    let last = parts.len() - 1;
-    for (index, part) in parts.iter().enumerate() {
-        let mut raw = part.to_vec();
-        if index < last {
-            raw.push('-');
-        }
+    for (raw, _) in hyphen_parts(word) {
         // `silero-stress` baut `re_cond` aus einer Liste, nicht aus einem String;
         // das resultierende Muster matcht keine normalen Zeichen. Der Modellinput
         // ist deshalb nur die Kleinschreibung: Apostrophe und Bindestriche bleiben.
@@ -197,21 +186,6 @@ fn push_word(word: &[char], tokens: &mut Vec<Token>) {
     }
 }
 
-fn split_on(word: &[char], separator: char) -> Vec<Vec<char>> {
-    let mut parts = Vec::new();
-    let mut current = Vec::new();
-    for ch in word {
-        if *ch == separator {
-            parts.push(current);
-            current = Vec::new();
-        } else {
-            current.push(*ch);
-        }
-    }
-    parts.push(current);
-    parts
-}
-
 /// Pythons `re` behandelt zusätzlich die Steuerzeichen U+001C..U+001F als `\s`.
 fn is_delimiter(ch: char) -> bool {
     ch.is_whitespace()
@@ -220,16 +194,6 @@ fn is_delimiter(ch: char) -> bool {
             '.' | ',' | '!' | '?' | ';' | ':' | '<' | '>' | '=' | '(' | ')' | '/' | '\\' | '\u{1c}'
                 ..='\u{1f}'
         )
-}
-
-/// Kleinschreibung mit genau einem Zeichen je Eingabezeichen, damit die
-/// Positionsindizes zu `raw` passen. Ukrainische Buchstaben sind 1:1; `İ` würde
-/// bei Pythons `str.lower()` expandieren und die Indizes verschieben.
-fn lower_chars(chars: &[char]) -> Vec<char> {
-    chars
-        .iter()
-        .map(|ch| ch.to_lowercase().next().unwrap_or(*ch))
-        .collect()
 }
 
 /// Setzt die Betonung für ein bereits vorbereitetes Wort.
@@ -264,11 +228,7 @@ fn get_positions(word: &[char], stressed_vowel_ids: &[i32]) -> (Vec<usize>, usiz
         .filter(|(_, ch)| VOWELS.contains(**ch))
         .map(|(index, _)| index)
         .collect();
-    let positions = stressed_vowel_ids
-        .iter()
-        .filter(|id| **id >= 0 && (**id as usize) < vowel_positions.len())
-        .map(|id| vowel_positions[*id as usize])
-        .collect();
+    let positions = ordinal_positions(&vowel_positions, stressed_vowel_ids);
     let first = vowel_positions.first().copied().unwrap_or(0);
     (positions, vowel_positions.len(), first)
 }

@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use candle_core::{Result, Tensor};
 use candle_nn::{Linear, Module, VarBuilder};
+use realfft::num_complex::Complex32;
 use realfft::{ComplexToReal, RealFftPlanner};
-use rustfft::num_complex::Complex32;
 
 use crate::Error;
 
@@ -13,33 +13,40 @@ use crate::Error;
 /// Fenster der Länge `win_length`; beide müssen deshalb übereinstimmen.
 ///
 /// `pad = (win - hop) / 2` wird später als `y[pad..len - pad]` abgeschnitten.
-/// Bei `pad == 0` wäre der Schnitt leer, in Python `y[:, 0:-0]` dagegen
-/// ergäbe der Schnitt bei Rust alles. Deshalb ist `pad == 0` ein Fehler.
+/// Bei `pad == 0` weichen die Schnitte ab: Python `y[:, 0:-0]` ist leer, der Rust-Schnitt
+/// `y[0..len]` enthält dagegen alles. Deshalb ist `pad == 0` ein Fehler.
 fn validate_fft(n_fft: usize, hop: usize, win: usize) -> crate::Result<()> {
     if n_fft == 0 || !n_fft.is_multiple_of(2) {
-        return Err(Error::Model(format!(
+        return Err(Error::model_msg(format!(
             "n_fft muss gerade und > 0 sein: {n_fft}"
         )));
     }
     if win == 0 || hop == 0 || hop > win {
-        return Err(Error::Model(format!(
+        return Err(Error::model_msg(format!(
             "hop_length/win_length unbrauchbar: {hop}/{win}"
         )));
     }
     if n_fft != win {
-        return Err(Error::Model(format!(
+        return Err(Error::model_msg(format!(
             "n_fft {n_fft} != win_length {win}: der ISTFT-Frame schreibt n_fft Samples"
         )));
     }
     if (win - hop) / 2 == 0 {
-        return Err(Error::Model(format!(
+        return Err(Error::model_msg(format!(
             "pad (win - hop) / 2 ist 0 bei hop_length {hop} / win_length {win}"
         )));
     }
     Ok(())
 }
 
-pub struct Head {
+/// Spektrum in Frame-Major-Layout: jeweils `[1, T, 1201]`, zusammenhängend im Speicher.
+pub(crate) struct Spectrum {
+    pub mag: Tensor,
+    pub cos: Tensor,
+    pub sin: Tensor,
+}
+
+pub(crate) struct Head {
     out: Linear,
     /// Fenster mal `1 / n_fft`; spart die Skalierung pro Sample.
     window_scaled: Vec<f32>,
@@ -60,7 +67,7 @@ impl Head {
     /// Gibt einen Fehler zurück, wenn die FFT-Geometrie unbrauchbar ist, die
     /// Fensterlänge nicht `win_length` entspricht oder der Layer nicht geladen
     /// werden kann.
-    pub fn load(
+    pub(crate) fn load(
         vb: VarBuilder,
         window: Vec<f32>,
         n_fft: usize,
@@ -69,14 +76,14 @@ impl Head {
     ) -> crate::Result<Self> {
         validate_fft(n_fft, hop, win)?;
         if window.len() != win {
-            return Err(Error::Model(format!(
+            return Err(Error::model_msg(format!(
                 "ISTFT-Fenster hat {} statt win_length {win} Werte",
                 window.len()
             )));
         }
         let bins = n_fft / 2 + 1;
         let out = candle_nn::linear(512, 2 * bins, vb.pp("out"))
-            .map_err(|error| Error::Model(format!("out: {error}")))?;
+            .map_err(|error| Error::model("out", error))?;
         let irfft = RealFftPlanner::<f32>::new().plan_fft_inverse(n_fft);
         let scale = 1.0 / n_fft as f32;
         let window_scaled = window.iter().map(|value| value * scale).collect();
@@ -93,22 +100,25 @@ impl Head {
         })
     }
 
-    /// Features `[1, T, 512]` -> `(mag, cos, sin)`, jeweils `[1, 1201, T]`.
-    pub fn forward(&self, x: &Tensor) -> Result<(Tensor, Tensor, Tensor)> {
-        let x = self.out.forward(x)?.transpose(1, 2)?;
+    /// Features `[1, T, 512]` -> Betrag, Kosinus und Sinus, jeweils `[1, T, 1201]`.
+    ///
+    /// Frame-major und zusammenhängend: `exp`/`cos`/`sin` laufen so auf dem schnellen
+    /// Pfad von candle, und die ISTFT liest die Bins eines Frames am Stück.
+    pub(crate) fn forward(&self, x: &Tensor) -> Result<Spectrum> {
+        let x = self.out.forward(x)?;
         let bins = self.n_fft / 2 + 1;
-        let mag = x.narrow(1, 0, bins)?;
-        let phase = x.narrow(1, bins, bins)?;
-        let mag = mag.exp()?.clamp(f32::MIN, 100.0)?;
+        let mag = x.narrow(2, 0, bins)?.contiguous()?;
+        let phase = x.narrow(2, bins, bins)?.contiguous()?;
+        let mag = mag.exp()?.minimum(100f32)?;
         let cos = phase.cos()?;
         let sin = phase.sin()?;
-        Ok((mag, cos, sin))
+        Ok(Spectrum { mag, cos, sin })
     }
 
     /// `ISTFT(mag * (cos + i sin))`, überlappt und durch die Fensterhülle
     /// geteilt.
-    pub fn istft(&self, mag: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Vec<f32>> {
-        let (_, bins, frames) = mag.dims3()?;
+    pub(crate) fn istft(&self, spectrum: &Spectrum) -> Result<Vec<f32>> {
+        let (_, frames, bins) = spectrum.mag.dims3()?;
         let expected_bins = self.n_fft / 2 + 1;
         if bins != expected_bins {
             return Err(candle_core::Error::Msg(format!(
@@ -119,9 +129,9 @@ impl Head {
             return Ok(Vec::new());
         }
         // Frame-major (`frame * bins + bin`): die Bin-Schleife liest zusammenhängend.
-        let mag = frame_major(mag)?;
-        let cos = frame_major(cos)?;
-        let sin = frame_major(sin)?;
+        let mag = flat(&spectrum.mag)?;
+        let cos = flat(&spectrum.cos)?;
+        let sin = flat(&spectrum.sin)?;
 
         let mut input = self.irfft.make_input_vec();
         let mut output = self.irfft.make_output_vec();
@@ -185,13 +195,9 @@ impl Head {
     }
 }
 
-/// Liest `[1, bins, frames]` als flachen Vektor in Reihenfolge `frame * bins + bin`.
-fn frame_major(spectrum: &Tensor) -> Result<Vec<f32>> {
-    spectrum
-        .transpose(1, 2)?
-        .contiguous()?
-        .flatten_all()?
-        .to_vec1::<f32>()
+/// Liest `[1, frames, bins]` als flachen Vektor in Reihenfolge `frame * bins + bin`.
+fn flat(spectrum: &Tensor) -> Result<Vec<f32>> {
+    spectrum.flatten_all()?.to_vec1::<f32>()
 }
 
 #[cfg(test)]

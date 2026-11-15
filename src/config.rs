@@ -9,14 +9,14 @@ use crate::error::io_at;
 use crate::{Error, Result};
 
 /// Obergrenze der Positional-Encoding-Tabellen; gilt für alle v5-Pakete.
-pub const MAX_POSITIONS: usize = 5000;
+pub(crate) const MAX_POSITIONS: usize = 5000;
 
 /// Werte, die `scripts/export_silero.py` aus dem TorchScript-Paket liest.
 ///
 /// Die Lookup-Tabellen entstehen in [`Config::load`]; ein direktes `serde`-Parsen
 /// lässt sie leer.
 #[derive(Debug, Clone, Deserialize)]
-pub struct Config {
+pub(crate) struct Config {
     pub symbols: String,
     pub symbol_to_id: HashMap<String, u32>,
     pub speakers: HashMap<String, u32>,
@@ -29,14 +29,18 @@ pub struct Config {
     /// der größten Sprecher-ID abgeleitet; `v5_cis_ext` hat eine Lücke in den IDs.
     #[serde(default)]
     pub speaker_rows: Option<usize>,
-    /// Nur `v5_ru`/`v5_6_ru` haben Akzentor und Homograph-Löser.
+    /// Nur `v5_ru` hat Akzentor und Homograph-Löser. `v5_6_ru` wird nicht unterstützt.
     #[serde(default)]
-    pub bert: Option<BertConfig>,
+    bert: Option<BertConfig>,
     #[serde(default)]
-    pub tokenizer: Option<TokenizerConfig>,
+    tokenizer: Option<TokenizerConfig>,
     /// Ukrainischer Akzentor (`v5_cis_base_nostress`).
     #[serde(default)]
-    pub accentor: Option<AccentorConfig>,
+    accentor: Option<AccentorConfig>,
+    /// Aus `bert`, `tokenizer` und `accentor` abgeleitet; [`Config::load`] verschiebt
+    /// die drei Felder hierher.
+    #[serde(skip)]
+    stress: StressConfig,
     /// Einzelzeichen-Schlüssel aus `symbol_to_id`, für `symbol_id` ohne Allokation.
     #[serde(skip)]
     char_ids: HashMap<char, u32>,
@@ -52,7 +56,7 @@ pub struct Config {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct BertConfig {
+pub(crate) struct BertConfig {
     pub vocab_size: usize,
     pub hidden_size: usize,
     pub num_hidden_layers: usize,
@@ -65,6 +69,10 @@ pub struct BertConfig {
     pub initializer_range: f64,
     pub layer_norm_eps: f64,
     pub pad_token_id: usize,
+    #[expect(
+        dead_code,
+        reason = "Pflichtfeld des config.json-Schemas, wird aber nicht gelesen"
+    )]
     pub position_embedding_type: String,
     pub use_cache: bool,
     pub classifier_dropout: Option<f64>,
@@ -72,8 +80,12 @@ pub struct BertConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct TokenizerConfig {
+pub(crate) struct TokenizerConfig {
     pub never_split: Vec<String>,
+    #[expect(
+        dead_code,
+        reason = "Pflichtfeld des config.json-Schemas, wird aber nicht gelesen"
+    )]
     pub unk_token_id: u32,
     pub sep_token_id: u32,
     pub pad_token_id: u32,
@@ -83,9 +95,28 @@ pub struct TokenizerConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct AccentorConfig {
+pub(crate) struct AccentorConfig {
     /// Sprachcode des Akzentors; derzeit nur `ukr`.
     pub lang: String,
+}
+
+/// Betonungskonfiguration eines Pakets; [`Config::load`] lässt nur gültige Kombinationen zu.
+#[derive(Debug, Clone, Default)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "eine Konfiguration je Paket; Boxen spart hier nichts"
+)]
+pub(crate) enum StressConfig {
+    /// `v5_ru`: BERT-Homograph-Löser plus russischer Akzentor.
+    Ru {
+        bert: BertConfig,
+        tokenizer: TokenizerConfig,
+    },
+    /// `v5_cis_base_nostress`: ukrainischer Akzentor.
+    Uk(AccentorConfig),
+    /// `v5_cis_ext`: der Aufrufer setzt die Betonung selbst.
+    #[default]
+    None,
 }
 
 impl Config {
@@ -96,115 +127,14 @@ impl Config {
     /// Gibt einen Fehler zurück, wenn die Datei nicht gelesen oder geparst werden kann,
     /// wenn Symbole oder Sprecher nicht genau einmal auf `0..COUNT` abgebildet sind
     /// oder wenn Abtastrate beziehungsweise `max_positions` nicht passen.
-    pub fn load(path: &Path) -> Result<Self> {
+    pub(crate) fn load(path: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(path).map_err(io_at(path))?;
-        let mut config: Self = serde_json::from_str(&text)
-            .map_err(|e| Error::Model(format!("{}: {e}", path.display())))?;
-        if config.symbols.is_empty() {
-            return Err(Error::Model(format!("{}: keine Symbole", path.display())));
-        }
-        let char_ids: HashMap<char, u32> = config
-            .symbol_to_id
-            .iter()
-            .filter_map(|(key, &id)| {
-                let mut chars = key.chars();
-                match (chars.next(), chars.next()) {
-                    (Some(ch), None) => Some((ch, id)),
-                    _ => None,
-                }
-            })
-            .collect();
-        if config.symbols.chars().any(|ch| !char_ids.contains_key(&ch)) {
-            return Err(Error::Model(format!("{}: Symbol ohne ID", path.display())));
-        }
-        let symbol_count = config
-            .symbol_to_id
-            .values()
-            .copied()
-            .max()
-            .map_or(0, |max| max as usize + 1);
-        if symbol_count != config.symbol_to_id.len() {
-            return Err(Error::Model(format!(
-                "{}: {} Symbol-IDs, aber IDs bis {}",
-                path.display(),
-                config.symbol_to_id.len(),
-                symbol_count.saturating_sub(1)
-            )));
-        }
-        check_dense_ids(
-            path,
-            "Symbol",
-            config.symbol_to_id.values().copied().collect(),
-            symbol_count,
-        )?;
-        let speaker_max = config
-            .speakers
-            .values()
-            .copied()
-            .max()
-            .map_or(0, |max| max as usize + 1);
-        let speaker_count = config.speaker_rows.unwrap_or(speaker_max);
-        if speaker_count < speaker_max || speaker_count == 0 {
-            return Err(Error::Model(format!(
-                "{}: speaker_rows {speaker_count} deckt Sprecher-IDs bis {} nicht ab",
-                path.display(),
-                speaker_max.saturating_sub(1)
-            )));
-        }
-        let mut seen = HashSet::with_capacity(config.speakers.len());
-        if let Some(duplicate) = config
-            .speakers
-            .values()
-            .copied()
-            .find(|id| !seen.insert(*id))
-        {
-            return Err(Error::Model(format!(
-                "{}: doppelte Sprecher-ID {duplicate}",
-                path.display()
-            )));
-        }
-        if config.bert.is_some() != config.tokenizer.is_some() {
-            return Err(Error::Model(format!(
-                "{}: bert und tokenizer müssen gemeinsam vorhanden sein",
-                path.display()
-            )));
-        }
-        if let Some(accentor) = &config.accentor {
-            if accentor.lang != "ukr" {
-                return Err(Error::Model(format!(
-                    "{}: Akzentor-Sprache {:?} statt \"ukr\"",
-                    path.display(),
-                    accentor.lang
-                )));
-            }
-            if config.bert.is_some() {
-                return Err(Error::Model(format!(
-                    "{}: russischer und ukrainischer Akzentor schließen sich aus",
-                    path.display()
-                )));
-            }
-            if !char_ids.contains_key(&'+') {
-                return Err(Error::Model(format!(
-                    "{}: Akzentor braucht '+' im Symbolalphabet",
-                    path.display()
-                )));
-            }
-        }
-        if config.sample_rate != crate::SAMPLE_RATE {
-            return Err(Error::Model(format!(
-                "{}: sample_rate {} statt {}",
-                path.display(),
-                config.sample_rate,
-                crate::SAMPLE_RATE
-            )));
-        }
-        if config.max_positions != MAX_POSITIONS {
-            return Err(Error::Model(format!(
-                "{}: max_positions {} statt {MAX_POSITIONS}",
-                path.display(),
-                config.max_positions
-            )));
-        }
+        let mut config: Self =
+            serde_json::from_str(&text).map_err(|e| Error::model(path.display().to_string(), e))?;
+        let (char_ids, symbol_count) = config.validate_symbols(path)?;
+        let speaker_count = config.validate_speakers(path)?;
+        config.stress = config.take_stress(path, &char_ids)?;
+        config.validate_audio(path)?;
         config.char_ids = char_ids;
         // Die v5_cis-Symboltabelle beginnt mit `|!'`; ein blindes `skip(3)` würde
         // `!` und `'` verschlucken. `_`, `~` und `|` bleiben Steuerzeichen.
@@ -219,40 +149,179 @@ impl Config {
         Ok(config)
     }
 
+    /// Prüft, dass `symbols` und `symbol_to_id` zusammenpassen und die IDs `0..COUNT`
+    /// genau einmal belegen. Liefert die Einzelzeichen-Tabelle und `COUNT`.
+    fn validate_symbols(&self, path: &Path) -> Result<(HashMap<char, u32>, usize)> {
+        if self.symbols.is_empty() {
+            return Err(Error::model_msg(format!(
+                "{}: keine Symbole",
+                path.display()
+            )));
+        }
+        let char_ids: HashMap<char, u32> = self
+            .symbol_to_id
+            .iter()
+            .filter_map(|(key, &id)| {
+                let mut chars = key.chars();
+                match (chars.next(), chars.next()) {
+                    (Some(ch), None) => Some((ch, id)),
+                    _ => None,
+                }
+            })
+            .collect();
+        if self.symbols.chars().any(|ch| !char_ids.contains_key(&ch)) {
+            return Err(Error::model_msg(format!(
+                "{}: Symbol ohne ID",
+                path.display()
+            )));
+        }
+        let symbol_count = self
+            .symbol_to_id
+            .values()
+            .copied()
+            .max()
+            .map_or(0, |max| max as usize + 1);
+        if symbol_count != self.symbol_to_id.len() {
+            return Err(Error::model_msg(format!(
+                "{}: {} Symbol-IDs, aber IDs bis {}",
+                path.display(),
+                self.symbol_to_id.len(),
+                symbol_count.saturating_sub(1)
+            )));
+        }
+        check_dense_ids(
+            path,
+            "Symbol",
+            self.symbol_to_id.values().copied().collect(),
+            symbol_count,
+        )?;
+        Ok((char_ids, symbol_count))
+    }
+
+    /// Prüft Sprecher-IDs auf Lücken-Deckung und Duplikate. Liefert die Zeilenzahl der
+    /// Speaker-Embeddings.
+    fn validate_speakers(&self, path: &Path) -> Result<usize> {
+        let speaker_max = self
+            .speakers
+            .values()
+            .copied()
+            .max()
+            .map_or(0, |max| max as usize + 1);
+        let speaker_count = self.speaker_rows.unwrap_or(speaker_max);
+        if speaker_count < speaker_max || speaker_count == 0 {
+            return Err(Error::model_msg(format!(
+                "{}: speaker_rows {speaker_count} deckt Sprecher-IDs bis {} nicht ab",
+                path.display(),
+                speaker_max.saturating_sub(1)
+            )));
+        }
+        let mut seen = HashSet::with_capacity(self.speakers.len());
+        if let Some(duplicate) = self.speakers.values().copied().find(|id| !seen.insert(*id)) {
+            return Err(Error::model_msg(format!(
+                "{}: doppelte Sprecher-ID {duplicate}",
+                path.display()
+            )));
+        }
+        Ok(speaker_count)
+    }
+
+    /// Verschiebt `bert`, `tokenizer` und `accentor` in eine gültige [`StressConfig`].
+    fn take_stress(&mut self, path: &Path, char_ids: &HashMap<char, u32>) -> Result<StressConfig> {
+        let russian = match (self.bert.take(), self.tokenizer.take()) {
+            (Some(bert), Some(tokenizer)) => Some((bert, tokenizer)),
+            (None, None) => None,
+            _ => {
+                return Err(Error::model_msg(format!(
+                    "{}: bert und tokenizer müssen gemeinsam vorhanden sein",
+                    path.display()
+                )));
+            }
+        };
+        let Some(accentor) = self.accentor.take() else {
+            return Ok(
+                russian.map_or(StressConfig::None, |(bert, tokenizer)| StressConfig::Ru {
+                    bert,
+                    tokenizer,
+                }),
+            );
+        };
+        if accentor.lang != "ukr" {
+            return Err(Error::model_msg(format!(
+                "{}: Akzentor-Sprache {:?} statt \"ukr\"",
+                path.display(),
+                accentor.lang
+            )));
+        }
+        if russian.is_some() {
+            return Err(Error::model_msg(format!(
+                "{}: russischer und ukrainischer Akzentor schließen sich aus",
+                path.display()
+            )));
+        }
+        if !char_ids.contains_key(&'+') {
+            return Err(Error::model_msg(format!(
+                "{}: Akzentor braucht '+' im Symbolalphabet",
+                path.display()
+            )));
+        }
+        Ok(StressConfig::Uk(accentor))
+    }
+
+    /// Prüft Abtastrate und Positions-Obergrenze gegen die feste Architektur.
+    fn validate_audio(&self, path: &Path) -> Result<()> {
+        if self.sample_rate != crate::SAMPLE_RATE {
+            return Err(Error::model_msg(format!(
+                "{}: sample_rate {} statt {}",
+                path.display(),
+                self.sample_rate,
+                crate::SAMPLE_RATE
+            )));
+        }
+        if self.max_positions != MAX_POSITIONS {
+            return Err(Error::model_msg(format!(
+                "{}: max_positions {} statt {MAX_POSITIONS}",
+                path.display(),
+                self.max_positions
+            )));
+        }
+        Ok(())
+    }
+
+    /// Betonungsmodell des Pakets, aus `bert`/`tokenizer`/`accentor` abgeleitet.
+    pub(crate) fn stress(&self) -> &StressConfig {
+        &self.stress
+    }
+
     /// Zeilen der Symbol-Embeddings (`max(symbol_to_id) + 1`).
-    pub fn symbol_count(&self) -> usize {
+    pub(crate) fn symbol_count(&self) -> usize {
         self.symbol_count
     }
 
     /// Zeilen der Speaker-Embeddings.
-    pub fn speaker_count(&self) -> usize {
+    pub(crate) fn speaker_count(&self) -> usize {
         self.speaker_count
     }
 
     /// `true`, wenn das Paket die Betonung selbst setzt: russischer Akzentor
     /// (`v5_ru`) oder ukrainischer Akzentor (`v5_cis_base_nostress`, optional
     /// auch `v5_cis_ext`).
-    pub fn has_accentor(&self) -> bool {
-        self.bert.is_some() || self.accentor.is_some()
+    pub(crate) fn has_accentor(&self) -> bool {
+        !matches!(self.stress, StressConfig::None)
     }
 
     /// `true`, wenn der Akzentor auf die Sprache der Stimme passt. Die Sprache
     /// steht vor dem ersten `_` (`ukr_igor` → `ukr`). Der ukrainische Akzentor
     /// darf z. B. keine kaukasischen Stimmen im CIS-Paket verändern.
-    pub fn accentor_matches(&self, voice: &str) -> bool {
-        self.accentor
-            .as_ref()
-            .is_some_and(|accentor| voice.split('_').next() == Some(accentor.lang.as_str()))
+    pub(crate) fn accentor_matches(&self, voice: &str) -> bool {
+        match &self.stress {
+            StressConfig::Uk(accentor) => voice.split('_').next() == Some(accentor.lang.as_str()),
+            StressConfig::Ru { .. } | StressConfig::None => false,
+        }
     }
 
     /// `true`, wenn diese Stimme beim Laden die Betonung selbst setzt.
-    pub fn has_accentor_for(&self, voice: &str) -> bool {
-        self.bert.is_some() || self.accentor_matches(voice)
-    }
-
-    /// `true`, wenn `ch` im Symbolalphabet des Pakets vorkommt.
-    pub fn has_symbol(&self, ch: char) -> bool {
-        self.char_ids.contains_key(&ch)
+    pub(crate) fn has_accentor_for(&self, voice: &str) -> bool {
+        matches!(self.stress, StressConfig::Ru { .. }) || self.accentor_matches(voice)
     }
 
     /// IDs für `|text~`, wie `preprocess_tacotron`.
@@ -260,7 +329,7 @@ impl Config {
     /// # Errors
     ///
     /// Gibt einen Fehler zurück, wenn ein Zeichen kein Symbol aus `config.json` ist.
-    pub fn sequence(&self, text: &[char]) -> Result<Vec<u32>> {
+    pub(crate) fn sequence(&self, text: &[char]) -> Result<Vec<u32>> {
         let mut ids = Vec::with_capacity(text.len() + 2);
         ids.push(self.symbol_id('|')?);
         for ch in text {
@@ -273,7 +342,7 @@ impl Config {
     /// # Errors
     ///
     /// Gibt einen Fehler zurück, wenn `ch` kein Symbol aus `config.json` ist.
-    pub fn symbol_id(&self, ch: char) -> Result<u32> {
+    pub(crate) fn symbol_id(&self, ch: char) -> Result<u32> {
         self.char_ids
             .get(&ch)
             .copied()
@@ -283,7 +352,7 @@ impl Config {
     /// # Errors
     ///
     /// Gibt einen Fehler zurück, wenn `voice` kein Sprecher aus `config.json` ist.
-    pub fn speaker_id(&self, voice: &str) -> Result<u32> {
+    pub(crate) fn speaker_id(&self, voice: &str) -> Result<u32> {
         self.speakers
             .get(voice)
             .copied()
@@ -291,7 +360,7 @@ impl Config {
     }
 
     /// Zeichen, die `prepare_text_input` behält: `symbols[3:]` plus `^`.
-    pub fn allowed_chars(&self) -> &HashSet<char> {
+    pub(crate) fn allowed_chars(&self) -> &HashSet<char> {
         &self.allowed
     }
 }
@@ -309,7 +378,7 @@ fn check_dense_ids(path: &Path, label: &str, mut ids: Vec<u32>, count: usize) ->
     let mut seen = HashSet::with_capacity(ids.len());
     for id in ids {
         if !seen.insert(id) {
-            return Err(Error::Model(format!(
+            return Err(Error::model_msg(format!(
                 "{}: doppelte {label}-ID {id}",
                 path.display()
             )));
@@ -319,7 +388,7 @@ fn check_dense_ids(path: &Path, label: &str, mut ids: Vec<u32>, count: usize) ->
     if seen != expected {
         let mut found: Vec<u32> = seen.into_iter().collect();
         found.sort_unstable();
-        return Err(Error::Model(format!(
+        return Err(Error::model_msg(format!(
             "{}: {label}-IDs {found:?} statt 0..{count}",
             path.display()
         )));

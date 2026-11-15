@@ -42,7 +42,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 `Silero::load` probes Metal once: if the backend starts and a small GEMM round-trips,
 all model tensors run there; otherwise the whole model is loaded on the CPU.
-`Silero::device()` reports the choice. `Silero::load_with_device(dir, &Device::Cpu)`
+`Silero::device()` reports the choice. `default_device()` runs the same probe and
+caches its result for the process, so a caller that only reports the device creates
+no second Metal instance and `Silero::load` reuses the probed device.
+`Silero::load_with_device(dir, &Device::Cpu)`
 forces a device, for example for CPU/Metal comparisons.
 
 Long text should use `Silero::synthesize_text`, which splits it into chunks of at most 400 characters and joins the audio without a pause.
@@ -195,10 +198,12 @@ Profile of one 4.94 s chunk (395 mel frames, median of 9 runs):
 | Homosolver (BERT) | 4.7 | 3 % |
 | Accentor and text frontend | 0.3 | <1 % |
 
-Inside the backbone about 62 % are the GEMMs (`pwconv1`/`pwconv2`), 31 % are LayerNorm,
-layout copies and the seven-tap depthwise conv, 5 % are the embedding and
-`final_layer_norm`. The hand-written depthwise conv is roughly eleven times faster than
-`conv1d(groups = 512)`, because candle splits the groups into 512 separate convolutions.
+Inside the backbone about 62 % are the GEMMs (`pwconv1`/`pwconv2`). The exact GELU (erf)
+was about 31 %; it now has a parallel CPU path (a polynomial erf approximation, other
+devices keep `gelu_erf`). LayerNorm, layout copies and the depthwise conv together are
+about 4 %; the layout stays NTC. The hand-written depthwise conv is roughly eleven times
+faster than `conv1d(groups = 512)`, because candle splits the groups into 512 separate
+convolutions.
 
 ## License
 

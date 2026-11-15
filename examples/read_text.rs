@@ -12,11 +12,10 @@
 //! Bringt das Ext-Modell den Akzentor mit, wird er für `ukr_*`-Stimmen ebenfalls
 //! automatisch angewendet; sonst muss der Text `+`-Marken enthalten.
 
-use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use silero_v5_candle::{Error, Result, Silero};
+use silero_v5_candle::{Error, Result, Silero, write_wav};
 
 /// Modell mit den `v5_cis_ext`-Stimmen; wird bei Bedarf automatisch geladen.
 const EXT_MODEL: &str = "models/silero-v5-cis-ext";
@@ -100,6 +99,11 @@ fn main() -> std::process::ExitCode {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("fehler: {error}");
+            let mut cause = std::error::Error::source(&error);
+            while let Some(source) = cause {
+                eprintln!("  ursache: {source}");
+                cause = source.source();
+            }
             std::process::ExitCode::FAILURE
         }
     }
@@ -113,7 +117,7 @@ fn load_model(request: &Request) -> Result<(Silero, PathBuf)> {
     if !request.model_explicit
         && request.language == Language::Uk
         && request.voice.starts_with("ukr_")
-        && !has_voice(&model, &request.voice)
+        && !model.has_voice(&request.voice)
     {
         let ext_path = PathBuf::from(EXT_MODEL);
         let ext = Silero::load(&ext_path).map_err(|error| {
@@ -123,19 +127,20 @@ fn load_model(request: &Request) -> Result<(Silero, PathBuf)> {
                 ext_path.display()
             ))
         })?;
-        if has_voice(&ext, &request.voice) {
+        if ext.has_voice(&request.voice) {
             model = ext;
             path = ext_path;
         }
     }
-    if !has_voice(&model, &request.voice) {
+    if !model.has_voice(&request.voice) {
         let mut available: Vec<&str> = model
             .voices()
-            .into_iter()
+            .iter()
+            .map(String::as_str)
             .filter(|name| request.language != Language::Uk || name.starts_with("ukr_"))
             .collect();
         if available.is_empty() {
-            available = model.voices();
+            available = model.voices().iter().map(String::as_str).collect();
         }
         let hint = if request.language == Language::Uk {
             format!("; ohne --model wird {EXT_MODEL} automatisch geladen")
@@ -149,10 +154,6 @@ fn load_model(request: &Request) -> Result<(Silero, PathBuf)> {
         )));
     }
     Ok((model, path))
-}
-
-fn has_voice(model: &Silero, voice: &str) -> bool {
-    model.voices().contains(&voice)
 }
 
 fn run() -> Result<()> {
@@ -246,46 +247,6 @@ where
 fn value(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<String> {
     args.next()
         .ok_or_else(|| Error::Input(format!("{flag} braucht einen Wert")))
-}
-
-fn write_wav(path: &Path, samples: &[f32], sample_rate: u32) -> Result<()> {
-    if let Some(parent) = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-    {
-        std::fs::create_dir_all(parent).map_err(Error::from)?;
-    }
-    let file = std::fs::File::create(path).map_err(|error| Error::Io {
-        path: Some(path.to_path_buf()),
-        source: error,
-    })?;
-    let mut writer = io::BufWriter::new(file);
-    let data_len = (samples.len() as u32) * 2;
-    let byte_rate = sample_rate * 2;
-    write(&mut writer, b"RIFF")?;
-    write(&mut writer, &(36 + data_len).to_le_bytes())?;
-    write(&mut writer, b"WAVEfmt ")?;
-    write(&mut writer, &16u32.to_le_bytes())?;
-    write(&mut writer, &1u16.to_le_bytes())?; // PCM
-    write(&mut writer, &1u16.to_le_bytes())?; // mono
-    write(&mut writer, &sample_rate.to_le_bytes())?;
-    write(&mut writer, &byte_rate.to_le_bytes())?;
-    write(&mut writer, &2u16.to_le_bytes())?; // block align
-    write(&mut writer, &16u16.to_le_bytes())?; // bits per sample
-    write(&mut writer, b"data")?;
-    write(&mut writer, &data_len.to_le_bytes())?;
-    for sample in samples {
-        let value = (sample.clamp(-1.0, 1.0) * 32767.0).round() as i16;
-        writer
-            .write_all(&value.to_le_bytes())
-            .map_err(Error::from)?;
-    }
-    writer.flush().map_err(Error::from)?;
-    Ok(())
-}
-
-fn write(writer: &mut impl io::Write, bytes: &[u8]) -> Result<()> {
-    writer.write_all(bytes).map_err(Error::from)
 }
 
 fn play(path: &Path) {

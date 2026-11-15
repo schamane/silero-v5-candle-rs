@@ -6,10 +6,10 @@ use candle_nn::{Conv1d, Conv1dConfig, Linear, Module, VarBuilder};
 
 use super::hourglass::HourGlass;
 use super::predictors::Predictors;
-use super::transformer::{ForwardTransformer, embedding};
+use super::transformer::{ForwardTransformer, embedding, speaker_vector};
 use crate::config::MAX_POSITIONS;
 
-pub struct Tacotron {
+pub(crate) struct Tacotron {
     embedding: Tensor,
     speaker_embedding: Tensor,
     encoder: ForwardTransformer,
@@ -20,7 +20,7 @@ pub struct Tacotron {
 }
 
 impl Tacotron {
-    pub fn load(
+    pub(crate) fn load(
         vb: VarBuilder,
         device: &Device,
         symbol_count: usize,
@@ -53,18 +53,16 @@ impl Tacotron {
         })
     }
 
-    pub fn encoder_output(&self, ids: &[u32]) -> Result<Tensor> {
+    pub(crate) fn encoder_output(&self, ids: &[u32]) -> Result<Tensor> {
         let embedded = embedding(&self.embedding, ids, &self.device)?.unsqueeze(0)?;
         self.encoder.forward(&embedded)
     }
 
     fn speaker(&self, speaker_id: u32) -> Result<Tensor> {
-        self.speaker_embedding
-            .index_select(&Tensor::from_vec(vec![speaker_id], 1, &self.device)?, 0)?
-            .reshape((1, 1, 128))
+        speaker_vector(&self.speaker_embedding, speaker_id, 128, &self.device)
     }
 
-    pub fn forward(
+    pub(crate) fn forward(
         &self,
         ids: &[u32],
         speaker_id: u32,
@@ -88,7 +86,7 @@ impl Tacotron {
     }
 }
 
-pub struct TacotronOutput {
+pub(crate) struct TacotronOutput {
     pub encoder: Tensor,
     pub cond: Tensor,
     pub expanded: Tensor,
@@ -96,7 +94,7 @@ pub struct TacotronOutput {
     pub mel: Tensor,
 }
 
-pub fn length_regulate(x: &Tensor, dur: &[u32]) -> Result<Tensor> {
+pub(crate) fn length_regulate(x: &Tensor, dur: &[u32]) -> Result<Tensor> {
     let total: usize = dur.iter().map(|d| *d as usize).sum();
     let mut indices = Vec::with_capacity(total);
     for (index, count) in dur.iter().enumerate() {
@@ -110,7 +108,7 @@ pub fn length_regulate(x: &Tensor, dur: &[u32]) -> Result<Tensor> {
 
 /// `exp(pred) - 1`, negativ auf 0, `round`, `/ durs_rate`, `round`, dann die
 /// vier festen Korrekturen. `torch.round` rundet Halbwerte gerade.
-pub fn postprocess_durations(raw: &Tensor, durs_rate: f32) -> Result<Vec<u32>> {
+pub(crate) fn postprocess_durations(raw: &Tensor, durs_rate: f32) -> Result<Vec<u32>> {
     let rows = raw.to_vec2::<f32>()?;
     let values = &rows[0];
     let mut dur: Vec<f32> = values
@@ -144,17 +142,24 @@ pub fn postprocess_durations(raw: &Tensor, durs_rate: f32) -> Result<Vec<u32>> {
 /// # Errors
 ///
 /// Gibt einen Fehler zurück, wenn ein Tensor-Operator fehlschlägt.
-pub fn update_pitch(pitch: &Tensor) -> Result<Tensor> {
+pub(crate) fn update_pitch(pitch: &Tensor) -> Result<Tensor> {
     let small = pitch.abs()?.lt(0.001f32)?;
     small.where_cond(&pitch.zeros_like()?, pitch)
 }
 
-pub struct Acoustic {
+pub(crate) struct Acoustic {
     tacotron: Tacotron,
     pub predictors: Predictors,
-    pub device: Device,
 }
 
+#[cfg_attr(
+    not(feature = "test-util"),
+    expect(
+        unreachable_pub,
+        dead_code,
+        reason = "nur mit `test-util` am Crate-Root sichtbar und gelesen"
+    )
+)]
 pub struct AcousticOutput {
     pub dur: Vec<u32>,
     pub dur_raw: Tensor,
@@ -168,7 +173,7 @@ pub struct AcousticOutput {
 }
 
 impl Acoustic {
-    pub fn load(
+    pub(crate) fn load(
         vb: VarBuilder,
         device: &Device,
         symbol_count: usize,
@@ -179,11 +184,10 @@ impl Acoustic {
         Ok(Self {
             tacotron,
             predictors,
-            device: device.clone(),
         })
     }
 
-    pub fn forward(&self, ids: &[u32], speaker_id: u32) -> Result<AcousticOutput> {
+    pub(crate) fn forward(&self, ids: &[u32], speaker_id: u32) -> Result<AcousticOutput> {
         if ids.len() > MAX_POSITIONS {
             candle_core::bail!("Sequenz zu lang: {} Symbole > {MAX_POSITIONS}", ids.len());
         }
