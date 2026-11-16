@@ -17,4 +17,11 @@ MIT), and scripts/export_accentor_uk.py from the silero-stress accentor
 (sha256 3a64944182f7e34ef831e990dc807246161e20c14c923506db0a20b8120ce13c, MIT,
 https://github.com/snakers4/silero-stress).
 
+The hard-case stress suites `tests/data/stress_hard60.json` and
+`tests/data/stress_hard60_uk.json` and their recorded results contain stress
+data derived from Wiktionary (CC BY-SA 4.0, https://www.wiktionary.org),
+Gramota.ru and the Avanesov orthoepic dictionary, with original sentence
+contexts. The compiled gold data is distributed under CC BY-SA 4.0:
+https://creativecommons.org/licenses/by-sa/4.0/
+
 This project is not affiliated with or endorsed by Silero.

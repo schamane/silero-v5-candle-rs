@@ -100,12 +100,29 @@ package's classifier is insufficient: `на двери` uses the prepositional
 `двер+и` (the genitive/dative `дв+ери` is kept after `у`/`к`).
 
 A separate 60-sentence hard-case suite (mobile stress, short forms, `-ся`,
-compounds, homographs, clitics; `stress_hard60.json` in the listening-page
-directory) scores 58/60 with the dictionary. The two remaining failures are
-context homographs (`права` after a copula, plural `стены` before `были`); they
-are tracked as A-148 in `SPEC-STE.md`. A separate Ukrainian hard-case suite
-(`stress_hard60_uk.json`, `ukr_igor`, 15 categories) scores 45/60; it exposes the
-missing dictionary/homograph layer of the Ukrainian n-gram accentor (A-149).
+compounds, homographs, clitics) lives in `tests/data/stress_hard60.json` and scores
+58/60 with the dictionary. The two remaining failures are context homographs
+(`права` after a copula, plural `стены` before `были`); they are tracked as A-148 in
+`SPEC-STE.md`. A separate Ukrainian hard-case suite
+(`tests/data/stress_hard60_uk.json`, voice `ukr_igor`, 15 categories) scores 45/60;
+it exposes the missing dictionary/homograph layer of the Ukrainian n-gram accentor
+(A-149).
+
+Both scores are reproducible and pinned by `tests/stress_hard.rs`:
+
+```sh
+cargo test --release --test stress_hard -- --nocapture
+# or manually, per suite:
+cargo run --release --example accent_suite -- models/silero-v5-ru \
+    tests/data/stress_hard60.json baya > /tmp/ru.txt
+python3 scripts/stress_bench_hard.py tests/data/stress_hard60.json /tmp/ru.txt
+cargo run --release --example accent_suite -- models/silero-v5-cis-base-nostress \
+    tests/data/stress_hard60_uk.json ukr_igor > /tmp/uk.txt
+python3 scripts/stress_bench_hard.py tests/data/stress_hard60_uk.json /tmp/uk.txt
+```
+
+The RU score includes the optional `stress_dict.tsv` layer; without the generated
+dictionary the test skips.
 
 A small CLI writes a WAV:
 
@@ -313,3 +330,4 @@ The crate source is CC BY-NC-SA 4.0, inherited from the Silero v5_ru package. Se
 | `v5_cis_base_nostress` weights | MIT |
 | Ukrainian accentor (`silero-stress`) | MIT |
 | optional `stress_dict.tsv` | CC BY-SA 4.0 (Wiktionary-derived) |
+| `tests/data/stress_hard*.json` | CC BY-SA 4.0 (Wiktionary/Gramota-derived gold) |

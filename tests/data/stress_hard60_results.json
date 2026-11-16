@@ -1,0 +1,49 @@
+{
+  "cases": 60,
+  "passed": 58,
+  "accuracy": 0.9666666666666667,
+  "categories": {
+    "clitic": 3,
+    "compound-loanword": 4,
+    "homograph": 4,
+    "it-verb": 3,
+    "mobile-noun": 4,
+    "mobile-verb": 4,
+    "name": 3,
+    "numeral": 4,
+    "nut-verb": 3,
+    "ova-verb": 3,
+    "past-fem": 4,
+    "past-sya": 4,
+    "plural": 3,
+    "prefixed-verb": 3,
+    "short-adjective": 3,
+    "short-participle": 4,
+    "yo": 4
+  },
+  "errors": [
+    {
+      "id": "h20",
+      "target": "права",
+      "expected": [
+        "прав+а"
+      ],
+      "got": [
+        "пр+ава",
+        "в"
+      ],
+      "line": "он+а был+а соверш+енно пр+ава в +этом сп+оре."
+    },
+    {
+      "id": "h30",
+      "target": "стены",
+      "expected": [
+        "ст+ены"
+      ],
+      "got": [
+        "стен+ы"
+      ],
+      "line": "стен+ы ст+арого д+ома б+ыли б+елыми."
+    }
+  ]
+}
