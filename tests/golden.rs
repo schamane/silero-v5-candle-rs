@@ -21,11 +21,26 @@ fn require_golden() -> bool {
     std::env::var_os("SILERO_REQUIRE_GOLDEN").is_some()
 }
 
+/// CPU immer, dazu das Standardgerät, falls es Metal ist. So läuft jeder Golden-Test
+/// in einem `cargo test --release` auf beiden Geräten.
+fn devices() -> Vec<Device> {
+    let mut devices = vec![Device::Cpu];
+    let default = silero_v5_candle::default_device();
+    if default.is_metal() {
+        devices.push(default);
+    }
+    devices
+}
+
+fn device_name(device: &Device) -> &'static str {
+    if device.is_metal() { "Metal" } else { "CPU" }
+}
+
 fn model_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("models/silero-v5-ru")
 }
 
-fn load_model() -> Option<Silero> {
+fn load_model(device: &Device) -> Option<Silero> {
     let dir = model_dir();
     if !dir.is_dir() {
         if require_golden() {
@@ -40,7 +55,7 @@ fn load_model() -> Option<Silero> {
         ));
         return None;
     }
-    Some(Silero::load_reference(&dir).expect("Modell lädt"))
+    Some(Silero::load_reference_with_device(&dir, device).expect("Modell lädt"))
 }
 
 fn golden(path: &Path) -> HashMap<String, Tensor> {
@@ -206,7 +221,16 @@ fn goldens_match_python() {
         skip("Golden-Tests brauchen --release (candle im Debug-Build zu langsam)");
         return;
     }
-    let Some(model) = load_model() else { return };
+    for device in devices() {
+        eprintln!("goldens_match_python: Gerät {}", device_name(&device));
+        let Some(model) = load_model(&device) else {
+            return;
+        };
+        check_goldens(&model);
+    }
+}
+
+fn check_goldens(model: &Silero) {
     let dir = model_dir();
     let golden_dir = dir.join("golden");
     let texts =

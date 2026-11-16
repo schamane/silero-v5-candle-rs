@@ -27,7 +27,7 @@ Not affiliated with or endorsed by Silero.
   default and only compiles on Apple targets; elsewhere build with
   `--no-default-features` for the CPU-only variant.
 - Optional on macOS: Apple Accelerate via `--features accelerate` (CPU BLAS;
-  measured about 1.9× faster than candle's pure-Rust CPU GEMM on an M1).
+  about 1.7–1.9× faster than candle's pure-Rust CPU GEMM on an M1 in earlier measurements, not re-measured).
 - Model files under `models/silero-v5-ru/`, `models/silero-v5-cis-ext/` and/or
   `models/silero-v5-cis-base-nostress/` (not in git, see below)
 
@@ -64,8 +64,9 @@ cleanly when no Metal device is available.
 
 The device can also be set with `SILERO_DEVICE=auto|cpu|metal` (read by `Silero::load` and
 the CLI; `--device` wins) or in code with `Silero::load_with_choice(dir, DeviceChoice::Cpu)`.
-On a base M1, Metal wins a single short chunk by about 20-30 %, but multi-chunk text is
-faster on CPU thanks to parallel chunks: set `SILERO_DEVICE=cpu` for long texts.
+On a base M1, Metal was faster for a single chunk (about 1.6x for a short and 1.2x for a long
+chunk); for multi-chunk text with parallel chunks, CPU and Metal were close in the measurements
+(see Performance).
 
 Concurrency: on Metal a process-wide lock serialises the GPU stages (candle 0.11.1 can
 crash when buffers are released concurrently); the CPU ISTFT runs outside it. A Metal
@@ -228,6 +229,12 @@ cargo test --release --test golden_cis        # Ukrainian sentence against the P
 cargo test --release --test golden_cis_nostress   # 2 CIS-base sentences with the Python accentor
 cargo test --release --test golden_accentor_uk    # Ukrainian accentor logits and sentences
 cargo test --release --test accent_dictionary      # optional stress_dict.tsv + accent_text
+cargo test --release --test parallel               # synthesize_chunks vs synthesize_text, bit-identical
+cargo test --release --test metal_vs_cpu           # Metal against CPU audio (macOS, Metal)
+cargo test --release --test metal_concurrency      # concurrent synthesize on Metal (macOS, Metal)
+make test                                         # all tests, release build (goldens run)
+make test-debug                                   # all tests, debug build (goldens skip)
+make check-linux                                  # cargo check --lib for Linux; skips if the target is not installed
 make lint-rust                                    # clippy, default, CPU and Accelerate paths
 make check                                        # lint + release tests on Metal, CPU and Accelerate
 ```
@@ -239,8 +246,9 @@ match) and audio within 5e-3. On Metal, `backbone` uses 5e-3 (measured 3.7e-3) a
 2.5e-2 (measured 1.7e-2) because f32 GEMMs accumulate in a different order; all other
 bounds, including audio at 5e-3, are shared. The Accelerate/MKL CPU path uses a
 `backbone` bound of 2e-3 (measured 1.43e-3) for the same reason; the CIS goldens
-already pass unchanged. Over the 10 s benchmark text, Metal and CPU audio differ
-by at most 4 int16 LSB (1.2e-4); Accelerate vs. pure CPU differs by at most 2.2e-3
+already pass unchanged. Metal and CPU audio differ by at most 1.6e-5 on a short
+text, 2.1e-4 on a long text and 2.8e-4 over the corpus (about 9 int16 LSB; test tolerance
+1e-3 in `tests/metal_vs_cpu.rs`); Accelerate vs. pure CPU differs by at most 2.2e-3
 over the 34-sentence corpus. The largest measured audio difference is 2.9e-3 (sentence 4,
 aidar); sentence 33 is about 3.9e-5. Sentence 33 covers the padding path with two homographs
 of different BERT token counts. For `v5_cis_base_nostress`, the ConvNeXt and magnitude
@@ -254,39 +262,47 @@ strings. `chunks_match_python` is a regression snapshot of
 
 ## Performance
 
-Apple M1 (8 Cores, 16 GiB), `--release`, `tests/corpus.txt` (34 Satz-Chunks,
-110,8 s Audio), Stimme `baya`, Median aus 5 Läufen. `MAX_PARALLEL_CHUNKS` ist 8;
-die Chunks laufen auf CPU und Metal parallel.
+Apple M1 (8 Cores, 16 GiB), macOS 27.2.1, rustc 1.100.0, candle 0.11.1, `--release`, Stimme `baya`.
+`MAX_PARALLEL_CHUNKS` ist 8; die Chunks laufen auf CPU und Metal parallel.
 
-| Backend | Chunk-Threads | Synthese | RTF | Speedup |
-|---|---:|---:|---:|---:|
-| Metal | 1 (sequenziell) | 1,563 s | 0,0141 | 1,00× |
-| Metal | 4 | 1,178 s | 0,0106 | 1,33× |
-| Metal | 8 | **1,160 s** | **0,0105** | **1,35×** |
-| CPU, pure Rust | 4 | 1,386 s | 0,0125 | 1,13× |
-| CPU, pure Rust | 8 | 1,205 s | 0,0109 | 1,30× |
-| CPU, Accelerate | 4 | 0,720 s | 0,0065 | 2,17× |
-| CPU, Accelerate | 8 | **0,697 s** | **0,0063** | **2,24×** |
+Gemessen am 2026-11-16 auf dem Endstand (Median aus 55 Läufen (Laden: 45), 5 Runden, je 2 Aufwärmläufe),
+ohne `stress_dict.tsv`. Eingaben: kurz = 32 Zeichen (2,14 s Audio), lang = 305 Zeichen, ein Chunk
+(22,09 s), Corpus = die ersten 20 Zeilen von `tests/corpus.txt` (58,6 s, parallele Chunks
+über `synthesize_text`). RTF = Zeit / Audiodauer. Die Spalte „Faktor“ ist die Beschleunigung gegenüber
+dem Stand vor der Optimierung (`67cbc11`) auf CPU / Metal.
 
-Ein einzelner 8,12-s-Chunk (dort greift keine Chunk-Parallelität):
+| Eingabe | CPU ms | Metal ms | RTF CPU | RTF Metal | Faktor CPU / Metal |
+|---|---:|---:|---:|---:|---:|
+| kurz | 45,7 | 29,2 | 0,0214 | 0,0137 | 1,32× / 1,71× |
+| lang | 345 | 282 | 0,0156 | 0,0127 | 1,42× / 1,52× |
+| Corpus, parallel | 694 | 666 | 0,0118 | 0,0114 | 2,12× / 1,99× |
+| Corpus, `synthesize_chunks` sequenziell | 1 132 | 812 | 0,0193 | 0,0139 | – |
 
-| Backend | Synthese | RTF |
-|---|---:|---:|
-| Metal | 0,107 s | 0,0132 |
-| CPU, pure Rust | 0,126 s | 0,0155 |
-| CPU, Accelerate | **0,065 s** | **0,0080** |
+Metal ist bei einem einzelnen Chunk schneller (kurz 1,56×, lang 1,23×). Beim Corpus mit parallelen
+Chunks liegen CPU und Metal dicht beieinander, und die Streuung zwischen den Runden überlappt;
+sequenziell ist Metal schneller. Metal streut auf diesem Rechner stärker als die CPU.
+Alle Zahlen, Streubereiche, Stufenaufteilung und Methodik: [docs/messungen.html](docs/messungen.html),
+Rohdaten: [docs/messungen-rohdaten.json](docs/messungen-rohdaten.json).
 
-Auf dieser Maschine ist CPU + Accelerate der schnellste Pfad; Metal gewinnt
-durch Chunk-Parallelität 26 %, bleibt aber hinter Accelerate. Der erste
-Metal-Prozess zahlt etwa 11 s Shader-Kompilierung (4,5 s Load, 6,9 s erster
-Chunk); spätere Prozesse nutzen den macOS-Shader-Cache und laden in ~0,25 s.
-CPU + Accelerate hat diesen Kaltstart nicht. Peak RSS liegt mit acht Chunks bei
-etwa 550 MB.
+Messprogramm: `benches/sbench.rs` (Bench-Ziel ohne Harness). Aufruf zum Beispiel
+`cargo bench --bench sbench -- run cpu short,long,corpus`; `RUNS` setzt die Zahl der
+gemessenen Läufe (Standard 11, je Eingabe zwei Aufwärmläufe davor) und `MODEL` den Modellordner
+(Standard `models/silero-v5-ru` im Repo). Die Zahlen der Stände A, B und C stammen aus je einem
+Build desselben Programms gegen den jeweiligen Commit; das Programm im Baum misst nur den
+aktuellen Stand.
+Weitere Modi: `load`, `rss`, `dump` und `cold` (Laden plus erste Synthese in einem frischen Prozess).
 
-Nach der Umsetzung über die CLI (`synthesize_text`, dieselben 34 Chunks, Median
-aus 5 Läufen): Metal 1,40 s (RTF 0,0127), CPU pure Rust 1,30 s (0,0118) und
-CPU + Accelerate 0,77 s (0,0070). Die Tabelle oben stammt aus dem separaten
-Chunk-Harness mit expliziten Thread-Zahlen.
+Kaltstart: Die erste Synthese eines frischen Metal-Starts kompilierte in der Messung vom
+2026-11-16 die Shader (Stand `67cbc11`: 509 ms Laden, 11 120 ms erste Synthese; frühere Messung der
+Fable-Review: 595 ms und 11 176 ms in einem neuen Verzeichnis). Die danach gestarteten Stände
+`911e96d` und der Endstand (`15e24c1` plus Arbeitsbaum) brauchten in neuen Verzeichnissen nur 53 bzw. 48 ms für die erste Synthese,
+der Cache war dann warm. Wovon er abhängt, wurde nicht untersucht. Die CPU hat keinen Kaltstart.
+Die Ladezeiten dieser Kaltstarts sind nicht direkt vergleichbar: Stand A hatte noch keinen
+Wörterbuch-Lader, B und C luden `stress_dict.tsv`, falls es im Modellordner lag.
+
+Laden und Speicher (Median, ohne `stress_dict.tsv`): warmes Laden 43 ms (CPU) und 56 ms (Metal);
+Spitzen-RSS von Laden plus Corpus 431 MiB (CPU) und 448 MiB (Metal). Mit dem 75 MB großen
+`stress_dict.tsv` im Modellordner liegt die Ladezeit bei etwa 240 ms.
 
 Die folgenden Zahlen sind historische Generationenvergleiche vor Accelerate und
 Chunk-Parallelität:
@@ -298,7 +314,8 @@ Chunk-Parallelität:
 | Post-Metal | `f024297` | Metal | 0.110 s | 0.014 |
 
 Historisches Profil eines 4,94-s-Chunks (395 Mel-Frames, Median aus 9 Läufen, vor
-Accelerate und Chunk-Parallelität):
+Accelerate und Chunk-Parallelität; das aktuelle Profil steht in
+[docs/messungen.html](docs/messungen.html), Abschnitt e):
 
 | Stage | ms | Share |
 |---|---:|---:|

@@ -23,7 +23,7 @@ fn require_golden() -> bool {
     std::env::var_os("SILERO_REQUIRE_GOLDEN").is_some()
 }
 
-fn load_model() -> Option<Silero> {
+fn load_model(device: &Device) -> Option<Silero> {
     let dir = model_dir();
     let golden = dir.join("golden/text.jsonl");
     if !golden.is_file() {
@@ -39,7 +39,7 @@ fn load_model() -> Option<Silero> {
         ));
         return None;
     }
-    Some(Silero::load(&dir).expect("Nostress-Modell lädt"))
+    Some(Silero::load_with_device(&dir, device).expect("Nostress-Modell lädt"))
 }
 
 fn golden(path: &Path) -> HashMap<String, Tensor> {
@@ -125,6 +125,21 @@ fn compare(name: &str, actual: &Tensor, expected: &Tensor, tolerance: f32) {
     eprintln!("{name}: max {max:.3e}");
 }
 
+/// CPU immer, dazu das Standardgerät, falls es Metal ist. So läuft jeder Golden-Test
+/// in einem `cargo test --release` auf beiden Geräten.
+fn devices() -> Vec<Device> {
+    let mut devices = vec![Device::Cpu];
+    let default = silero_v5_candle::default_device();
+    if default.is_metal() {
+        devices.push(default);
+    }
+    devices
+}
+
+fn device_name(device: &Device) -> &'static str {
+    if device.is_metal() { "Metal" } else { "CPU" }
+}
+
 #[test]
 fn ukrainian_nostress_golden_matches_python() {
     if cfg!(debug_assertions) {
@@ -134,7 +149,19 @@ fn ukrainian_nostress_golden_matches_python() {
         skip("Golden-Tests brauchen --release");
         return;
     }
-    let Some(model) = load_model() else { return };
+    for device in devices() {
+        eprintln!(
+            "ukrainian_nostress_golden_matches_python: Gerät {}",
+            device_name(&device)
+        );
+        let Some(model) = load_model(&device) else {
+            return;
+        };
+        check(&model);
+    }
+}
+
+fn check(model: &Silero) {
     assert!(model.has_accentor(), "Nostress-Modell braucht Akzentor");
     assert!(model.has_accentor_for("ukr_igor"));
     assert!(!model.has_accentor_for("kaz_zhadyra"));

@@ -69,6 +69,21 @@ fn compare(name: &str, actual: &Tensor, expected: &Tensor, tolerance: f32) {
     eprintln!("{name}: max {max:.3e}");
 }
 
+/// CPU immer, dazu das Standardgerät, falls es Metal ist. So läuft jeder Golden-Test
+/// in einem `cargo test --release` auf beiden Geräten.
+fn devices() -> Vec<Device> {
+    let mut devices = vec![Device::Cpu];
+    let default = silero_v5_candle::default_device();
+    if default.is_metal() {
+        devices.push(default);
+    }
+    devices
+}
+
+fn device_name(device: &Device) -> &'static str {
+    if device.is_metal() { "Metal" } else { "CPU" }
+}
+
 #[test]
 fn ukrainian_golden_matches_python() {
     if cfg!(debug_assertions) {
@@ -90,7 +105,17 @@ fn ukrainian_golden_matches_python() {
         skip(&format!("{} fehlt", golden_path.display()));
         return;
     }
-    let model = Silero::load(&dir).expect("CIS-Modell lädt");
+    for device in devices() {
+        eprintln!(
+            "ukrainian_golden_matches_python: Gerät {}",
+            device_name(&device)
+        );
+        let model = Silero::load_with_device(&dir, &device).expect("CIS-Modell lädt");
+        check(&model, &golden_path);
+    }
+}
+
+fn check(model: &Silero, golden_path: &Path) {
     if model.has_accentor() {
         assert!(model.has_accentor_for(VOICE));
         assert!(!model.has_accentor_for("kaz_abai"));
@@ -103,7 +128,7 @@ fn ukrainian_golden_matches_python() {
         );
     }
     let stages = model.debug_stages(TEXT, VOICE).expect("Synthese läuft");
-    let expected = golden(&golden_path);
+    let expected = golden(golden_path);
 
     let sequence = integers(&expected["sequence"]);
     assert_eq!(stages.ids.len(), sequence.len(), "sequence");

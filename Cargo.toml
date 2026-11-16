@@ -56,6 +56,10 @@ path = "src/lib.rs"
 name = "silero"
 path = "src/bin/silero.rs"
 
+[[bench]]
+name = "sbench"
+harness = false
+
 [dependencies]
 candle-core = "0.11"
 candle-nn = "0.11"

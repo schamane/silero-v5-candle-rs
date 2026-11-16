@@ -63,6 +63,9 @@ fn run() -> Result<()> {
     let model = Silero::load_with_choice(&request.dir, request.device)?;
     let sample_rate = model.sample_rate();
     let load = start.elapsed();
+    if model.device().is_metal() && load.as_secs_f64() > 1.0 {
+        eprintln!("Metal-Shader werden beim ersten Start einmalig kompiliert (kann ~10 s dauern)");
+    }
     let synth = Instant::now();
     let samples = model.synthesize_text(&request.text, &request.voice)?;
     let synth = synth.elapsed();

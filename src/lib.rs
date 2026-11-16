@@ -95,9 +95,9 @@ fn metal_probe(device: &Device) -> candle_core::Result<()> {
 
 /// Wahl des Rechengeräts für [`Silero::load_with_choice`].
 ///
-/// Auf einem Basis-M1 gewinnt Metal bei einem einzelnen kurzen Chunk etwa 20-30 %;
-/// bei mehrchunkigem Text ist die CPU dank paralleler Chunks schneller. Für lange
-/// Texte hilft `SILERO_DEVICE=cpu`.
+/// Auf einem Basis-M1 ist Metal bei einem einzelnen Chunk schneller (gemessen etwa
+/// 1,2-1,6x); bei mehrchunkigem Text mit parallelen Chunks liegen CPU und Metal
+/// nahe beieinander. Mit `SILERO_DEVICE=cpu` lässt sich Metal abschalten.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum DeviceChoice {
     /// [`default_device`]: Metal, wenn nutzbar, sonst CPU.
@@ -291,9 +291,10 @@ impl Silero {
     /// Umgebungsvariable `SILERO_DEVICE` (`auto`, `cpu` oder `metal`) überstimmt
     /// diese Wahl.
     ///
-    /// Auf einem Basis-M1 gewinnt Metal bei einem einzelnen kurzen Chunk etwa 20-30 %;
-    /// mehrchunkiger Text ist auf der CPU dank paralleler Chunks schneller
-    /// (`SILERO_DEVICE=cpu`). Welches Gerät gewählt wurde, sagt [`Silero::device`].
+    /// Auf einem Basis-M1 ist Metal bei einem einzelnen Chunk schneller (gemessen
+    /// etwa 1,2-1,6x); bei mehrchunkigem Text liegen CPU und Metal nahe beieinander
+    /// (`SILERO_DEVICE=cpu` schaltet Metal ab). Welches Gerät gewählt wurde, sagt
+    /// [`Silero::device`].
     ///
     /// Mitten im Lauf scheiternde Metal-Aufrufe erscheinen als [`Error::Pipeline`],
     /// ohne Rückfall auf die CPU; siehe die Hinweise bei [`Silero`].
@@ -339,7 +340,13 @@ impl Silero {
     /// die Python-Referenz kennt das optionale Wörterbuch nicht.
     #[cfg(feature = "test-util")]
     pub fn load_reference(dir: &Path) -> Result<Self> {
-        Self::load_impl(dir, &default_device(), false)
+        Self::load_reference_with_device(dir, &default_device())
+    }
+
+    /// Wie [`Silero::load_reference`], aber auf einem explizit gewählten Gerät.
+    #[cfg(feature = "test-util")]
+    pub fn load_reference_with_device(dir: &Path, device: &Device) -> Result<Self> {
+        Self::load_impl(dir, device, false)
     }
 
     fn load_impl(dir: &Path, device: &Device, with_dictionary: bool) -> Result<Self> {

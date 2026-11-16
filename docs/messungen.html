@@ -1,0 +1,307 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Messungen Silero v5 candle</title>
+<style>
+:root{color-scheme:light dark;--bg:#fcfcfb;--surface:#ffffff;--ink:#0b0b0b;--ink2:#52514e;--grid:#e4e3df;--base:#8a8984;--rule:#dcdbd6;
+--s1:#2a78d6;--s2:#eb6834;--s3:#1baf7a;--s4:#eda100;--s5:#e87ba4;--s6:#008300;--code:#f1f0ec}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#1a1a19;--surface:#222221;--ink:#f0efec;--ink2:#c3c2b7;--grid:#34342f;--base:#8c8b83;--rule:#3a3a36;
+--s1:#3987e5;--s2:#d95926;--s3:#199e70;--s4:#c98500;--s5:#d55181;--s6:#0ca30c;--code:#2a2a28}}
+:root[data-theme="dark"]{--bg:#1a1a19;--surface:#222221;--ink:#f0efec;--ink2:#c3c2b7;--grid:#34342f;--base:#8c8b83;--rule:#3a3a36;
+--s1:#3987e5;--s2:#d95926;--s3:#199e70;--s4:#c98500;--s5:#d55181;--s6:#0ca30c;--code:#2a2a28}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{max-width:1040px;margin:0 auto;padding:24px 16px 64px}
+h1{font-size:1.7rem;line-height:1.2;margin:0 0 8px}
+h2{font-size:1.25rem;margin:40px 0 12px;padding-top:16px;border-top:1px solid var(--rule)}
+h3{font-size:1rem;margin:8px 0}
+.lead{color:var(--ink2);margin:0 0 16px}
+.meta{display:grid;grid-template-columns:max-content 1fr;gap:4px 16px;margin:0;font-size:.95rem}
+.meta dt{color:var(--ink2)}.meta dd{margin:0}
+code,pre{font:.88em ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--code);border-radius:4px}
+code{padding:1px 4px}pre{padding:10px 12px;overflow-x:auto}
+ul{padding-left:1.2rem}li{margin:4px 0}
+.note{color:var(--ink2);font-size:.92rem}
+.legend{list-style:none;display:flex;flex-wrap:wrap;gap:6px 16px;padding:0;margin:8px 0}
+.legend li{display:flex;align-items:center;gap:6px;margin:0;font-size:.92rem}
+.sw{width:12px;height:12px;border-radius:3px;display:inline-block}
+.grid3{display:grid;grid-template-columns:repeat(auto-fit,minmax(290px,1fr));gap:16px;margin:8px 0 20px}
+.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:16px;margin:8px 0 16px}
+figure{margin:0;background:var(--surface);border:1px solid var(--rule);border-radius:8px;padding:10px}
+figure.one{max-width:460px}
+figcaption{font-size:.92rem;color:var(--ink2);margin-bottom:4px}
+.chart{width:100%;height:auto;display:block}
+.chart .grid{stroke:var(--grid);stroke-width:1}
+.chart .base{stroke:var(--base);stroke-width:1}
+.chart text{fill:var(--ink2);font:11px system-ui,sans-serif}
+.chart .val{fill:var(--ink);font-weight:600}
+.chart .grp{fill:var(--ink);font-size:12px;font-weight:600}
+table{border-collapse:collapse;width:100%;font-size:.88rem;margin:12px 0;display:block;overflow-x:auto}
+th,td{padding:5px 8px;border-bottom:1px solid var(--rule);text-align:left;white-space:nowrap}
+th{color:var(--ink2);font-weight:600}
+.n{text-align:right;font-variant-numeric:tabular-nums}
+small{color:var(--ink2)}
+tr.tot td{font-weight:600}
+footer{margin-top:40px;color:var(--ink2);font-size:.9rem}
+
+</style>
+</head>
+<body>
+<main>
+<header>
+<h1>Messungen: vor und nach der Optimierung</h1>
+<p class="lead">Silero v5 (<code>v5_ru</code>, Stimme <code>baya</code>) auf candle 0.11.1, Apple M1. Drei Code-Stände, je auf CPU und auf Metal, gleiche Eingaben, gleiches Messprogramm.</p>
+<dl class="meta">
+<dt>Maschine</dt><dd>Apple M1 (8 Kerne), 16 GiB, macOS 27.2.1</dd>
+<dt>Toolchain</dt><dd>rustc 1.100.0 (0ef1bc386 2026-11-09), candle 0.11.1, <code>--release</code></dd>
+<dt>Datum</dt><dd>2026-11-16</dd>
+<dt>Last</dt><dd>Load Average (1 min) zu Beginn jeder Serie: 2,79 bis 3,97 (Warteschwelle: unter 4). Der Wert enthält den eben beendeten Messlauf; 5 min und 15 min lagen zu Beginn bei 4–6 und fielen auf etwa 4 bis 4,5. Im Hintergrund liefen Browser und Fenster-Server. Metal streut deshalb stärker als CPU.</dd>
+</dl>
+</header>
+
+<section id="methodik">
+<h2>Methodik</h2>
+<ul>
+<li><strong>A vor Optimierung</strong>: Commit <code>67cbc11</code> (Metal aktiv, vor der gesamten Review-Arbeit). <strong>B nach CPU-Review</strong>: Commit <code>911e96d</code>. <strong>C Endstand</strong>: Commit <code>15e24c1</code> plus Arbeitsbaum (der Quelltext weicht nur um Doku-Kommentare, <code>load_reference_with_device</code> und eine CLI-Warnung zum Shader-Erststart ab); Inhalt: (Metal-Sperre, Gerätewahl, ConvNeXt/Head-Fusion auf Metal, parallele ISTFT, Tests auf beiden Geräten). Jeder Stand wurde ohne Eingriff in den Git-Zustand in ein eigenes Verzeichnis kopiert und mit eigenem Target-Verzeichnis gebaut.</li>
+<li><strong>Eingaben</strong> (in allen Ständen identisch): <em>kurz</em> = 32 Zeichen („Привет, как у тебя дела сегодня?“, 2.14 s Audio); <em>lang</em> = 305 Zeichen, ein Chunk (22.09 s); <em>Corpus</em> = die ersten 20 Zeilen von <code>tests/corpus.txt</code> (807 Zeichen, 58.6 s) über <code>synthesize_text</code>. Zustand A kennt nur das sequenzielle <code>synthesize_text</code>; das ist die ehrliche Basis. B und C rechnen mehrere Chunks parallel (höchstens 8 Threads).</li>
+<li><strong>Modellordner ohne <code>stress_dict.tsv</code></strong>: Der Modellordner im Repo enthält inzwischen ein optionales Betonungswörterbuch (75 MB), das nur B und C laden. Es ändert Betonung, Audiolänge und Ladezeit. Damit alle drei Stände dieselben Token-IDs sehen, zeigt die Messung auf einen Symlink-Ordner ohne diese eine Datei. Die Zahlen mit Wörterbuch stehen separat in Abschnitt d.</li>
+<li><strong>Ablauf</strong>: je Prozess 2 Aufwärmläufe, dann 11 gemessene Läufe, nur Wanduhr-Zeit der Synthese. 5 Runden, in jeder Runde A, B, C nacheinander (CPU, dann Metal), um Drift auszugleichen: 55 Läufe je Zelle (Laden: 45). Angegeben ist der <strong>Median über alle 55 Läufe</strong>; die Klammer ist die kleinste und größte Rundenmediane (Streuung zwischen den Runden). RTF = Median / Audiodauer. Metal-Shader waren vor den Serien kompiliert (Wegwerf-Lauf je Stand).</li>
+<li><strong>Ladezeit</strong>: 9 Ladevorgänge je Runde nach einem Wegwerf-Laden, Gerät bereits erzeugt. <strong>Spitzen-RSS</strong>: <code>/usr/bin/time -l</code>, ein frischer Prozess, Laden + Corpus, Median aus 3 Prozessen.</li>
+<li><strong>Befehle</strong> (Messprogramm <code>benches/sbench.rs</code>, je Stand mit identischem Quelltext gegen den jeweiligen Commit gebaut (<code>cargo build --release --benches</code>; der Aufruf im Baum lautet <code>cargo bench --bench sbench -- &lt;Modus&gt;</code>), <code>MODEL</code> zeigt auf den Ordner ohne Wörterbuch):</li>
+</ul>
+<pre>RUNS=11 sbench run  &lt;cpu|metal&gt; short,long,corpus[,chunks]
+RUNS=9  sbench load &lt;cpu|metal&gt;
+sbench cold &lt;cpu|metal&gt;                              # Laden + erste Synthese (kurz) im frischen Prozess
+/usr/bin/time -l sbench rss &lt;cpu|metal&gt;
+sbench dump &lt;cpu|metal&gt; &lt;short|long|corpus&gt; datei.f32      # Audio für Abschnitt g</pre>
+<p class="note">Die Rohdaten aller Läufe stehen in <code>docs/messungen-rohdaten.json</code>.</p>
+</section>
+
+<section id="vorher-nachher">
+<h2>b) Vor und nach</h2>
+<p>Median der Synthesezeit in ms, Achsen beginnen bei 0, jedes Diagramm hat seine eigene Skala. Unter jeder Gruppe steht der Faktor C gegenüber A.</p>
+<ul class="legend"><li><span class="sw" style="background:var(--s1)"></span>A vor Optimierung</li><li><span class="sw" style="background:var(--s2)"></span>B nach CPU-Review</li><li><span class="sw" style="background:var(--s3)"></span>C Endstand</li></ul>
+<div class="grid3">
+<figure><figcaption>kurz (32 Zeichen, 2.14 s)</figcaption><svg viewBox="0 0 360 270" role="img" aria-labelledby="t-short" class="chart"><title id="t-short">Synthesezeit kurz, A B C auf CPU und Metal</title>
+<line x1="48" x2="350" y1="212.0" y2="212.0" class="grid"/><text x="42" y="216.0" text-anchor="end" class="ax">0</text>
+<line x1="48" x2="350" y1="166.5" y2="166.5" class="grid"/><text x="42" y="170.5" text-anchor="end" class="ax">20</text>
+<line x1="48" x2="350" y1="121.0" y2="121.0" class="grid"/><text x="42" y="125.0" text-anchor="end" class="ax">40</text>
+<line x1="48" x2="350" y1="75.5" y2="75.5" class="grid"/><text x="42" y="79.5" text-anchor="end" class="ax">60</text>
+<line x1="48" x2="350" y1="30.0" y2="30.0" class="grid"/><text x="42" y="34.0" text-anchor="end" class="ax">80</text>
+<text x="10" y="18" class="ax">ms</text>
+<path d="M66.5,212.0 V79.2 Q66.5,75.2 70.5,75.2 H96.5 Q100.5,75.2 100.5,79.2 V212.0 Z" fill="var(--s1)"><title>A vor Optimierung, CPU: Median 60,1 ms</title></path>
+<text x="83.5" y="70.2" text-anchor="middle" class="val">60,1</text>
+<text x="83.5" y="225.0" text-anchor="middle" class="ax">A</text>
+<path d="M106.5,212.0 V110.1 Q106.5,106.1 110.5,106.1 H136.5 Q140.5,106.1 140.5,110.1 V212.0 Z" fill="var(--s2)"><title>B nach CPU-Review, CPU: Median 46,6 ms</title></path>
+<text x="123.5" y="101.1" text-anchor="middle" class="val">46,6</text>
+<text x="123.5" y="225.0" text-anchor="middle" class="ax">B</text>
+<path d="M146.5,212.0 V112.0 Q146.5,108.0 150.5,108.0 H176.5 Q180.5,108.0 180.5,112.0 V212.0 Z" fill="var(--s3)"><title>C Endstand, CPU: Median 45,7 ms</title></path>
+<text x="163.5" y="103.0" text-anchor="middle" class="val">45,7</text>
+<text x="163.5" y="225.0" text-anchor="middle" class="ax">C</text>
+<text x="123.5" y="242.0" text-anchor="middle" class="grp">CPU</text>
+<text x="123.5" y="257.0" text-anchor="middle" class="ax">C vs. A: 1,32×</text>
+<path d="M217.5,212.0 V102.3 Q217.5,98.3 221.5,98.3 H247.5 Q251.5,98.3 251.5,102.3 V212.0 Z" fill="var(--s1)"><title>A vor Optimierung, Metal: Median 50,0 ms</title></path>
+<text x="234.5" y="93.3" text-anchor="middle" class="val">50,0</text>
+<text x="234.5" y="225.0" text-anchor="middle" class="ax">A</text>
+<path d="M257.5,212.0 V128.2 Q257.5,124.2 261.5,124.2 H287.5 Q291.5,124.2 291.5,128.2 V212.0 Z" fill="var(--s2)"><title>B nach CPU-Review, Metal: Median 38,6 ms</title></path>
+<text x="274.5" y="119.2" text-anchor="middle" class="val">38,6</text>
+<text x="274.5" y="225.0" text-anchor="middle" class="ax">B</text>
+<path d="M297.5,212.0 V149.5 Q297.5,145.5 301.5,145.5 H327.5 Q331.5,145.5 331.5,149.5 V212.0 Z" fill="var(--s3)"><title>C Endstand, Metal: Median 29,2 ms</title></path>
+<text x="314.5" y="140.5" text-anchor="middle" class="val">29,2</text>
+<text x="314.5" y="225.0" text-anchor="middle" class="ax">C</text>
+<text x="274.5" y="242.0" text-anchor="middle" class="grp">Metal</text>
+<text x="274.5" y="257.0" text-anchor="middle" class="ax">C vs. A: 1,71×</text>
+<line x1="48" x2="350" y1="212" y2="212" class="base"/></svg></figure>
+<figure><figcaption>lang (305 Zeichen, 22.09 s)</figcaption><svg viewBox="0 0 360 270" role="img" aria-labelledby="t-long" class="chart"><title id="t-long">Synthesezeit lang, A B C auf CPU und Metal</title>
+<line x1="48" x2="350" y1="212.0" y2="212.0" class="grid"/><text x="42" y="216.0" text-anchor="end" class="ax">0</text>
+<line x1="48" x2="350" y1="166.5" y2="166.5" class="grid"/><text x="42" y="170.5" text-anchor="end" class="ax">200</text>
+<line x1="48" x2="350" y1="121.0" y2="121.0" class="grid"/><text x="42" y="125.0" text-anchor="end" class="ax">400</text>
+<line x1="48" x2="350" y1="75.5" y2="75.5" class="grid"/><text x="42" y="79.5" text-anchor="end" class="ax">600</text>
+<line x1="48" x2="350" y1="30.0" y2="30.0" class="grid"/><text x="42" y="34.0" text-anchor="end" class="ax">800</text>
+<text x="10" y="18" class="ax">ms</text>
+<path d="M66.5,212.0 V104.3 Q66.5,100.3 70.5,100.3 H96.5 Q100.5,100.3 100.5,104.3 V212.0 Z" fill="var(--s1)"><title>A vor Optimierung, CPU: Median 491 ms</title></path>
+<text x="83.5" y="95.3" text-anchor="middle" class="val">491</text>
+<text x="83.5" y="225.0" text-anchor="middle" class="ax">A</text>
+<path d="M106.5,212.0 V136.2 Q106.5,132.2 110.5,132.2 H136.5 Q140.5,132.2 140.5,136.2 V212.0 Z" fill="var(--s2)"><title>B nach CPU-Review, CPU: Median 351 ms</title></path>
+<text x="123.5" y="127.2" text-anchor="middle" class="val">351</text>
+<text x="123.5" y="225.0" text-anchor="middle" class="ax">B</text>
+<path d="M146.5,212.0 V137.4 Q146.5,133.4 150.5,133.4 H176.5 Q180.5,133.4 180.5,137.4 V212.0 Z" fill="var(--s3)"><title>C Endstand, CPU: Median 345 ms</title></path>
+<text x="163.5" y="128.4" text-anchor="middle" class="val">345</text>
+<text x="163.5" y="225.0" text-anchor="middle" class="ax">C</text>
+<text x="123.5" y="242.0" text-anchor="middle" class="grp">CPU</text>
+<text x="123.5" y="257.0" text-anchor="middle" class="ax">C vs. A: 1,42×</text>
+<path d="M217.5,212.0 V118.5 Q217.5,114.5 221.5,114.5 H247.5 Q251.5,114.5 251.5,118.5 V212.0 Z" fill="var(--s1)"><title>A vor Optimierung, Metal: Median 429 ms</title></path>
+<text x="234.5" y="109.5" text-anchor="middle" class="val">429</text>
+<text x="234.5" y="225.0" text-anchor="middle" class="ax">A</text>
+<path d="M257.5,212.0 V135.0 Q257.5,131.0 261.5,131.0 H287.5 Q291.5,131.0 291.5,135.0 V212.0 Z" fill="var(--s2)"><title>B nach CPU-Review, Metal: Median 356 ms</title></path>
+<text x="274.5" y="126.0" text-anchor="middle" class="val">356</text>
+<text x="274.5" y="225.0" text-anchor="middle" class="ax">B</text>
+<path d="M297.5,212.0 V151.9 Q297.5,147.9 301.5,147.9 H327.5 Q331.5,147.9 331.5,151.9 V212.0 Z" fill="var(--s3)"><title>C Endstand, Metal: Median 282 ms</title></path>
+<text x="314.5" y="142.9" text-anchor="middle" class="val">282</text>
+<text x="314.5" y="225.0" text-anchor="middle" class="ax">C</text>
+<text x="274.5" y="242.0" text-anchor="middle" class="grp">Metal</text>
+<text x="274.5" y="257.0" text-anchor="middle" class="ax">C vs. A: 1,52×</text>
+<line x1="48" x2="350" y1="212" y2="212" class="base"/></svg></figure>
+<figure><figcaption>Corpus (20 Zeilen, 58.6 s)</figcaption><svg viewBox="0 0 360 270" role="img" aria-labelledby="t-corpus" class="chart"><title id="t-corpus">Synthesezeit Corpus, A B C auf CPU und Metal</title>
+<line x1="48" x2="350" y1="212.0" y2="212.0" class="grid"/><text x="42" y="216.0" text-anchor="end" class="ax">0</text>
+<line x1="48" x2="350" y1="166.5" y2="166.5" class="grid"/><text x="42" y="170.5" text-anchor="end" class="ax">500</text>
+<line x1="48" x2="350" y1="121.0" y2="121.0" class="grid"/><text x="42" y="125.0" text-anchor="end" class="ax">1000</text>
+<line x1="48" x2="350" y1="75.5" y2="75.5" class="grid"/><text x="42" y="79.5" text-anchor="end" class="ax">1500</text>
+<line x1="48" x2="350" y1="30.0" y2="30.0" class="grid"/><text x="42" y="34.0" text-anchor="end" class="ax">2000</text>
+<text x="10" y="18" class="ax">ms</text>
+<path d="M66.5,212.0 V81.9 Q66.5,77.9 70.5,77.9 H96.5 Q100.5,77.9 100.5,81.9 V212.0 Z" fill="var(--s1)"><title>A vor Optimierung, CPU: Median 1 474 ms</title></path>
+<text x="83.5" y="72.9" text-anchor="middle" class="val">1 474</text>
+<text x="83.5" y="225.0" text-anchor="middle" class="ax">A</text>
+<path d="M106.5,212.0 V154.7 Q106.5,150.7 110.5,150.7 H136.5 Q140.5,150.7 140.5,154.7 V212.0 Z" fill="var(--s2)"><title>B nach CPU-Review, CPU: Median 673 ms</title></path>
+<text x="123.5" y="145.7" text-anchor="middle" class="val">673</text>
+<text x="123.5" y="225.0" text-anchor="middle" class="ax">B</text>
+<path d="M146.5,212.0 V152.9 Q146.5,148.9 150.5,148.9 H176.5 Q180.5,148.9 180.5,152.9 V212.0 Z" fill="var(--s3)"><title>C Endstand, CPU: Median 694 ms</title></path>
+<text x="163.5" y="143.9" text-anchor="middle" class="val">694</text>
+<text x="163.5" y="225.0" text-anchor="middle" class="ax">C</text>
+<text x="123.5" y="242.0" text-anchor="middle" class="grp">CPU</text>
+<text x="123.5" y="257.0" text-anchor="middle" class="ax">C vs. A: 2,12×</text>
+<path d="M217.5,212.0 V95.3 Q217.5,91.3 221.5,91.3 H247.5 Q251.5,91.3 251.5,95.3 V212.0 Z" fill="var(--s1)"><title>A vor Optimierung, Metal: Median 1 327 ms</title></path>
+<text x="234.5" y="86.3" text-anchor="middle" class="val">1 327</text>
+<text x="234.5" y="225.0" text-anchor="middle" class="ax">A</text>
+<path d="M257.5,212.0 V152.9 Q257.5,148.9 261.5,148.9 H287.5 Q291.5,148.9 291.5,152.9 V212.0 Z" fill="var(--s2)"><title>B nach CPU-Review, Metal: Median 693 ms</title></path>
+<text x="274.5" y="143.9" text-anchor="middle" class="val">693</text>
+<text x="274.5" y="225.0" text-anchor="middle" class="ax">B</text>
+<path d="M297.5,212.0 V155.4 Q297.5,151.4 301.5,151.4 H327.5 Q331.5,151.4 331.5,155.4 V212.0 Z" fill="var(--s3)"><title>C Endstand, Metal: Median 666 ms</title></path>
+<text x="314.5" y="146.4" text-anchor="middle" class="val">666</text>
+<text x="314.5" y="225.0" text-anchor="middle" class="ax">C</text>
+<text x="274.5" y="242.0" text-anchor="middle" class="grp">Metal</text>
+<text x="274.5" y="257.0" text-anchor="middle" class="ax">C vs. A: 1,99×</text>
+<line x1="48" x2="350" y1="212" y2="212" class="base"/></svg></figure>
+</div>
+<table><thead><tr><th>Eingabe</th><th>Gerät</th><th class="n">A ms</th><th class="n">B ms</th><th class="n">C ms</th><th class="n">C vs. A</th><th class="n">C vs. B</th><th class="n">RTF A</th><th class="n">RTF C</th></tr></thead><tbody><tr><td>kurz (2.1 s Audio)</td><td>CPU</td><td class="n">60,1<small> (58,8–83,9)</small></td><td class="n">46,6<small> (46,2–51,7)</small></td><td class="n">45,7<small> (45,6–46,2)</small></td><td class="n">1,32×</td><td class="n">1,02×</td><td class="n">0,0281</td><td class="n">0,0214</td></tr><tr><td>kurz (2.1 s Audio)</td><td>Metal</td><td class="n">50,0<small> (42,9–59,1)</small></td><td class="n">38,6<small> (33,4–42,2)</small></td><td class="n">29,2<small> (27,1–32,7)</small></td><td class="n">1,71×</td><td class="n">1,32×</td><td class="n">0,0234</td><td class="n">0,0137</td></tr><tr><td>lang (22.1 s Audio)</td><td>CPU</td><td class="n">491<small> (480–503)</small></td><td class="n">351<small> (346–376)</small></td><td class="n">345<small> (336–352)</small></td><td class="n">1,42×</td><td class="n">1,02×</td><td class="n">0,0222</td><td class="n">0,0156</td></tr><tr><td>lang (22.1 s Audio)</td><td>Metal</td><td class="n">429<small> (376–487)</small></td><td class="n">356<small> (304–393)</small></td><td class="n">282<small> (245–291)</small></td><td class="n">1,52×</td><td class="n">1,26×</td><td class="n">0,0194</td><td class="n">0,0127</td></tr><tr><td>Corpus (58.6 s Audio)</td><td>CPU</td><td class="n">1 474<small> (1 452–1 486)</small></td><td class="n">673<small> (659–726)</small></td><td class="n">694<small> (669–744)</small></td><td class="n">2,12×</td><td class="n">0,97×</td><td class="n">0,0252</td><td class="n">0,0118</td></tr><tr><td>Corpus (58.6 s Audio)</td><td>Metal</td><td class="n">1 327<small> (1 108–1 543)</small></td><td class="n">693<small> (601–818)</small></td><td class="n">666<small> (555–704)</small></td><td class="n">1,99×</td><td class="n">1,04×</td><td class="n">0,0226</td><td class="n">0,0114</td></tr></tbody></table>
+<p class="note">Faktoren C gegen A (Median): CPU kurz 1,32×, lang 1,42×, Corpus 2,12×; Metal kurz 1,71×, lang 1,52×, Corpus 1,99×. Metal streut stärker als CPU: der größte Rundenabstand liegt bei Zustand A Metal Corpus (1 108–1 543 ms).</p>
+</section>
+
+<section id="cpu-metal">
+<h2>c) CPU gegen Metal</h2>
+<p>Dieselben Messungen, quer gelesen. Echtzeitfaktor (RTF) für den Endstand C:</p>
+<div class="legend-row"><ul class="legend"><li><span class="sw" style="background:var(--s4)"></span>CPU</li><li><span class="sw" style="background:var(--s3)"></span>Metal</li></ul></div>
+<figure class="one"><svg viewBox="0 0 360 260" role="img" aria-labelledby="t-rtf" class="chart"><title id="t-rtf">Echtzeitfaktor Endstand C, CPU gegen Metal</title>
+<line x1="52" x2="350" y1="218.0" y2="218.0" class="grid"/><text x="46" y="222.0" text-anchor="end" class="ax">0,000</text>
+<line x1="52" x2="350" y1="171.0" y2="171.0" class="grid"/><text x="46" y="175.0" text-anchor="end" class="ax">0,010</text>
+<line x1="52" x2="350" y1="124.0" y2="124.0" class="grid"/><text x="46" y="128.0" text-anchor="end" class="ax">0,020</text>
+<line x1="52" x2="350" y1="77.0" y2="77.0" class="grid"/><text x="46" y="81.0" text-anchor="end" class="ax">0,030</text>
+<line x1="52" x2="350" y1="30.0" y2="30.0" class="grid"/><text x="46" y="34.0" text-anchor="end" class="ax">0,040</text>
+<text x="4" y="18" class="ax">RTF (kleiner ist schneller)</text>
+<path d="M58.7,218.0 V121.5 Q58.7,117.5 62.7,117.5 H94.7 Q98.7,117.5 98.7,121.5 V218.0 Z" fill="var(--s4)"><title>C CPU kurz: RTF 0,0214</title></path>
+<text x="78.7" y="112.5" text-anchor="middle" class="val">0,0214</text>
+<path d="M104.7,218.0 V157.8 Q104.7,153.8 108.7,153.8 H140.7 Q144.7,153.8 144.7,157.8 V218.0 Z" fill="var(--s3)"><title>C Metal kurz: RTF 0,0137</title></path>
+<text x="124.7" y="148.8" text-anchor="middle" class="val">0,0137</text>
+<text x="101.7" y="234.0" text-anchor="middle" class="grp">kurz</text>
+<path d="M158.0,218.0 V148.5 Q158.0,144.5 162.0,144.5 H194.0 Q198.0,144.5 198.0,148.5 V218.0 Z" fill="var(--s4)"><title>C CPU lang: RTF 0,0156</title></path>
+<text x="178.0" y="139.5" text-anchor="middle" class="val">0,0156</text>
+<path d="M204.0,218.0 V162.1 Q204.0,158.1 208.0,158.1 H240.0 Q244.0,158.1 244.0,162.1 V218.0 Z" fill="var(--s3)"><title>C Metal lang: RTF 0,0127</title></path>
+<text x="224.0" y="153.1" text-anchor="middle" class="val">0,0127</text>
+<text x="201.0" y="234.0" text-anchor="middle" class="grp">lang</text>
+<path d="M257.3,218.0 V166.3 Q257.3,162.3 261.3,162.3 H293.3 Q297.3,162.3 297.3,166.3 V218.0 Z" fill="var(--s4)"><title>C CPU Corpus: RTF 0,0118</title></path>
+<text x="277.3" y="157.3" text-anchor="middle" class="val">0,0118</text>
+<path d="M303.3,218.0 V168.6 Q303.3,164.6 307.3,164.6 H339.3 Q343.3,164.6 343.3,168.6 V218.0 Z" fill="var(--s3)"><title>C Metal Corpus: RTF 0,0114</title></path>
+<text x="323.3" y="159.6" text-anchor="middle" class="val">0,0114</text>
+<text x="300.3" y="234.0" text-anchor="middle" class="grp">Corpus</text>
+<line x1="52" x2="350" y1="218" y2="218" class="base"/></svg></figure>
+<table><thead><tr><th>Zustand C</th><th class="n">CPU ms</th><th class="n">Metal ms</th><th class="n">CPU RTF</th><th class="n">Metal RTF</th><th class="n">CPU / Metal</th></tr></thead><tbody><tr><td>kurz, 1 Chunk</td><td class="n">45,7<small> (45,6–46,2)</small></td><td class="n">29,2<small> (27,1–32,7)</small></td><td class="n">0,0214</td><td class="n">0,0137</td><td class="n">1,56×</td></tr><tr><td>lang, 1 Chunk</td><td class="n">345<small> (336–352)</small></td><td class="n">282<small> (245–291)</small></td><td class="n">0,0156</td><td class="n">0,0127</td><td class="n">1,23×</td></tr><tr><td>Corpus, <code>synthesize_text</code> (parallele Chunks)</td><td class="n">694<small> (669–744)</small></td><td class="n">666<small> (555–704)</small></td><td class="n">0,0118</td><td class="n">0,0114</td><td class="n">1,04×</td></tr><tr><td>Corpus, <code>synthesize_chunks</code> (sequenziell)</td><td class="n">1 132<small> (1 085–1 169)</small></td><td class="n">812<small> (685–846)</small></td><td class="n">0,0193</td><td class="n">0,0139</td><td class="n">1,39×</td></tr></tbody></table><table><thead><tr><th>Zustand A (nur <code>synthesize_text</code>, sequenziell)</th><th class="n">CPU ms</th><th class="n">Metal ms</th><th class="n">CPU / Metal</th></tr></thead><tbody><tr><td>kurz</td><td class="n">60,1</td><td class="n">50,0</td><td class="n">1,20×</td></tr><tr><td>lang</td><td class="n">491</td><td class="n">429</td><td class="n">1,15×</td></tr><tr><td>Corpus</td><td class="n">1 474</td><td class="n">1 327</td><td class="n">1,11×</td></tr></tbody></table>
+<p>Was die Daten sagen: Auf diesem Basis-M1 ist Metal bei einem einzelnen Chunk schneller (kurz 1,56×, lang 1,23×). Beim Corpus mit parallelen Chunks liegen CPU (694 ms) und Metal (666 ms) im Median dicht beieinander, und die Rundenbereiche überlappen sich (CPU 669–744, Metal 555–704 ms). Die Messung zeigt hier keinen klaren Sieger. Sequenziell über <code>synthesize_chunks</code> ist Metal deutlich schneller als die CPU; die Parallelisierung hilft der CPU stärker (sequenziell 1 132 ms auf 694 ms) als Metal (812 ms auf 666 ms).</p>
+</section>
+
+<section id="laden">
+<h2>d) Laden, Kaltstart, Speicher</h2>
+<table><thead><tr><th>Messgröße</th><th>Gerät</th><th class="n">A</th><th class="n">B</th><th class="n">C</th></tr></thead><tbody><tr><td>Warmes Laden, Median (ms)</td><td>CPU</td><td class="n">38,8<small> (37,4–39,4)</small></td><td class="n">38,6<small> (37,8–39,7)</small></td><td class="n">42,6<small> (40,9–43,9)</small></td></tr><tr><td>Warmes Laden, Median (ms)</td><td>Metal</td><td class="n">60,4<small> (53,0–62,0)</small></td><td class="n">45,9<small> (44,8–47,8)</small></td><td class="n">55,9<small> (50,4–59,2)</small></td></tr><tr><td>Spitzen-RSS, Laden + Corpus (MiB)</td><td>CPU</td><td class="n">432</td><td class="n">436</td><td class="n">431</td></tr><tr><td>Spitzen-RSS, Laden + Corpus (MiB)</td><td>Metal</td><td class="n">440</td><td class="n">440</td><td class="n">448</td></tr></tbody></table>
+<ul>
+<li><strong>Mit <code>stress_dict.tsv</code></strong> (75 MB, nur B und C): Ladezeit im Median B CPU 236 ms, B Metal 243 ms, C CPU 237 ms, C Metal 248 ms (erste Serie, 3 Runden × 9 Ladevorgänge). Spitzen-RSS von C mit Wörterbuch: 519 MiB (CPU) und 535 MiB (Metal), je ein Prozess.</li>
+<li><strong>Shader-Erststart</strong> (Metal): Frühere Messung der Fable-Review: 595 ms Laden und 11 176 ms für die erste Synthese in einem neuen Verzeichnis. In dieser Sitzung: Zustand A, erster Metal-Start: 509 ms Laden und 11 120 ms erste Synthese. B und C danach, jeweils in einem neuen Verzeichnis der ausführbaren Datei: erste Synthese 53 bzw. 48 ms, also ohne neue Kompilierung. Die Daten zeigen nur, dass der Cache in dieser Sitzung nach dem Lauf von A warm war; sie klären nicht, wovon er abhängt.</li>
+<li>Ladezeit ohne Wörterbuch: C braucht auf der CPU und auf Metal geringfügig mehr als A oder B (siehe Tabelle); das ist klein gegen die Synthesezeit, wurde aber nicht weiter untersucht.</li>
+</ul>
+</section>
+
+<section id="stufen">
+<h2>e) Stufenaufteilung (Endstand C)</h2>
+<p>Ein Chunk, je Stufe synchronisiert (CPU und Metal), Median aus 11 Läufen, Mittelwert zweier Wiederholungen. Die Synchronisation zwischen den Stufen verhindert die Überlappung in der Produktion, die Summe weicht daher leicht von den End-zu-End-Zeiten oben ab. Gemessen mit einer Kopie von C, die um eine reine Zeitmess-Methode erweitert wurde (<code>bench_stages</code>, nicht im Repo). Last zu Beginn: 3,88 (1 min).</p>
+<ul class="legend"><li><span class="sw" style="background:var(--s1)"></span>Text+Akzent (BERT, CPU)</li><li><span class="sw" style="background:var(--s2)"></span>Akustik</li><li><span class="sw" style="background:var(--s3)"></span>Backbone (ConvNeXt)</li><li><span class="sw" style="background:var(--s4)"></span>Head</li><li><span class="sw" style="background:var(--s5)"></span>Readback</li><li><span class="sw" style="background:var(--s6)"></span>ISTFT</li></ul>
+<div class="grid2">
+<figure><figcaption>kurz (32 Zeichen)</figcaption><svg viewBox="0 0 360 150" role="img" aria-labelledby="t-st-short" class="chart"><title id="t-st-short">Stufenzeiten kurz, CPU und Metal</title>
+<line x1="64.0" x2="64.0" y1="14" y2="96" class="grid"/><text x="64.0" y="112" text-anchor="middle" class="ax">0</text>
+<line x1="135.5" x2="135.5" y1="14" y2="96" class="grid"/><text x="135.5" y="112" text-anchor="middle" class="ax">20</text>
+<line x1="207.0" x2="207.0" y1="14" y2="96" class="grid"/><text x="207.0" y="112" text-anchor="middle" class="ax">40</text>
+<line x1="278.5" x2="278.5" y1="14" y2="96" class="grid"/><text x="278.5" y="112" text-anchor="middle" class="ax">60</text>
+<line x1="350.0" x2="350.0" y1="14" y2="96" class="grid"/><text x="350.0" y="112" text-anchor="middle" class="ax">80</text>
+<text x="207.0" y="130" text-anchor="middle" class="ax">ms (Summe der Stufen, mit Synchronisation)</text>
+<text x="56" y="39" text-anchor="end" class="grp">CPU</text>
+<rect x="64.0" y="22" width="9.9" height="26" fill="var(--s1)"><title>CPU, Text+Akzent (BERT, CPU): 3,33 ms</title></rect>
+<rect x="75.9" y="22" width="47.4" height="26" fill="var(--s2)"><title>CPU, Akustik: 13,81 ms</title></rect>
+<rect x="125.3" y="22" width="89.5" height="26" fill="var(--s3)"><title>CPU, Backbone (ConvNeXt): 25,60 ms</title></rect>
+<rect x="216.8" y="22" width="8.2" height="26" fill="var(--s4)"><title>CPU, Head: 2,84 ms</title></rect>
+<rect x="227.0" y="22" width="0.5" height="26" fill="var(--s5)"><title>CPU, Readback: 0,26 ms</title></rect>
+<rect x="227.9" y="22" width="0.9" height="26" fill="var(--s6)"><title>CPU, ISTFT: 0,81 ms</title></rect>
+<text x="234.8" y="39" class="val">46,9</text>
+<text x="56" y="77" text-anchor="end" class="grp">Metal</text>
+<rect x="64.0" y="60" width="11.7" height="26" fill="var(--s1)"><title>Metal, Text+Akzent (BERT, CPU): 3,85 ms</title></rect>
+<rect x="77.7" y="60" width="40.9" height="26" fill="var(--s2)"><title>Metal, Akustik: 11,99 ms</title></rect>
+<rect x="120.6" y="60" width="55.3" height="26" fill="var(--s3)"><title>Metal, Backbone (ConvNeXt): 16,02 ms</title></rect>
+<rect x="177.9" y="60" width="3.9" height="26" fill="var(--s4)"><title>Metal, Head: 1,65 ms</title></rect>
+<rect x="183.8" y="60" width="2.6" height="26" fill="var(--s5)"><title>Metal, Readback: 1,28 ms</title></rect>
+<rect x="188.3" y="60" width="2.0" height="26" fill="var(--s6)"><title>Metal, ISTFT: 1,10 ms</title></rect>
+<text x="196.3" y="77" class="val">35,7</text>
+</svg></figure>
+<figure><figcaption>lang (305 Zeichen)</figcaption><svg viewBox="0 0 360 150" role="img" aria-labelledby="t-st-long" class="chart"><title id="t-st-long">Stufenzeiten lang, CPU und Metal</title>
+<line x1="64.0" x2="64.0" y1="14" y2="96" class="grid"/><text x="64.0" y="112" text-anchor="middle" class="ax">0</text>
+<line x1="135.5" x2="135.5" y1="14" y2="96" class="grid"/><text x="135.5" y="112" text-anchor="middle" class="ax">100</text>
+<line x1="207.0" x2="207.0" y1="14" y2="96" class="grid"/><text x="207.0" y="112" text-anchor="middle" class="ax">200</text>
+<line x1="278.5" x2="278.5" y1="14" y2="96" class="grid"/><text x="278.5" y="112" text-anchor="middle" class="ax">300</text>
+<line x1="350.0" x2="350.0" y1="14" y2="96" class="grid"/><text x="350.0" y="112" text-anchor="middle" class="ax">400</text>
+<text x="207.0" y="130" text-anchor="middle" class="ax">ms (Summe der Stufen, mit Synchronisation)</text>
+<text x="56" y="39" text-anchor="end" class="grp">CPU</text>
+<rect x="64.0" y="22" width="21.9" height="26" fill="var(--s1)"><title>CPU, Text+Akzent (BERT, CPU): 33,36 ms</title></rect>
+<rect x="87.9" y="22" width="65.6" height="26" fill="var(--s2)"><title>CPU, Akustik: 94,57 ms</title></rect>
+<rect x="155.5" y="22" width="128.6" height="26" fill="var(--s3)"><title>CPU, Backbone (ConvNeXt): 182,64 ms</title></rect>
+<rect x="286.1" y="22" width="16.1" height="26" fill="var(--s4)"><title>CPU, Head: 25,36 ms</title></rect>
+<rect x="304.2" y="22" width="0.5" height="26" fill="var(--s5)"><title>CPU, Readback: 3,50 ms</title></rect>
+<rect x="306.7" y="22" width="2.3" height="26" fill="var(--s6)"><title>CPU, ISTFT: 6,07 ms</title></rect>
+<text x="315.0" y="39" class="val">348</text>
+<text x="56" y="77" text-anchor="end" class="grp">Metal</text>
+<rect x="64.0" y="60" width="31.8" height="26" fill="var(--s1)"><title>Metal, Text+Akzent (BERT, CPU): 47,27 ms</title></rect>
+<rect x="97.8" y="60" width="40.1" height="26" fill="var(--s2)"><title>Metal, Akustik: 58,90 ms</title></rect>
+<rect x="139.9" y="60" width="105.5" height="26" fill="var(--s3)"><title>Metal, Backbone (ConvNeXt): 150,35 ms</title></rect>
+<rect x="247.4" y="60" width="11.6" height="26" fill="var(--s4)"><title>Metal, Head: 19,01 ms</title></rect>
+<rect x="261.0" y="60" width="7.3" height="26" fill="var(--s5)"><title>Metal, Readback: 12,97 ms</title></rect>
+<rect x="270.3" y="60" width="5.6" height="26" fill="var(--s6)"><title>Metal, ISTFT: 10,66 ms</title></rect>
+<text x="281.9" y="77" class="val">300</text>
+</svg></figure>
+</div>
+<div class="grid2"><div><h3>kurz</h3><table><thead><tr><th>Stufe</th><th class="n">CPU ms</th><th class="n">Anteil</th><th class="n">Metal ms</th><th class="n">Anteil</th></tr></thead><tbody><tr><td>Text+Akzent (BERT, CPU)</td><td class="n">3,3</td><td class="n">7 %</td><td class="n">3,8</td><td class="n">11 %</td></tr><tr><td>Akustik</td><td class="n">13,8</td><td class="n">29 %</td><td class="n">12,0</td><td class="n">34 %</td></tr><tr><td>Backbone (ConvNeXt)</td><td class="n">25,6</td><td class="n">55 %</td><td class="n">16,0</td><td class="n">45 %</td></tr><tr><td>Head</td><td class="n">2,8</td><td class="n">6 %</td><td class="n">1,6</td><td class="n">5 %</td></tr><tr><td>Readback</td><td class="n">0,3</td><td class="n">1 %</td><td class="n">1,3</td><td class="n">4 %</td></tr><tr><td>ISTFT</td><td class="n">0,8</td><td class="n">2 %</td><td class="n">1,1</td><td class="n">3 %</td></tr><tr class="tot"><td>Summe</td><td class="n">46,9</td><td></td><td class="n">35,7</td><td></td></tr></tbody></table></div><div><h3>lang</h3><table><thead><tr><th>Stufe</th><th class="n">CPU ms</th><th class="n">Anteil</th><th class="n">Metal ms</th><th class="n">Anteil</th></tr></thead><tbody><tr><td>Text+Akzent (BERT, CPU)</td><td class="n">33,4</td><td class="n">10 %</td><td class="n">47,3</td><td class="n">16 %</td></tr><tr><td>Akustik</td><td class="n">94,6</td><td class="n">27 %</td><td class="n">58,9</td><td class="n">20 %</td></tr><tr><td>Backbone (ConvNeXt)</td><td class="n">182,6</td><td class="n">53 %</td><td class="n">150,3</td><td class="n">50 %</td></tr><tr><td>Head</td><td class="n">25,4</td><td class="n">7 %</td><td class="n">19,0</td><td class="n">6 %</td></tr><tr><td>Readback</td><td class="n">3,5</td><td class="n">1 %</td><td class="n">13,0</td><td class="n">4 %</td></tr><tr><td>ISTFT</td><td class="n">6,1</td><td class="n">2 %</td><td class="n">10,7</td><td class="n">4 %</td></tr><tr class="tot"><td>Summe</td><td class="n">347,7</td><td></td><td class="n">300,2</td><td></td></tr></tbody></table></div></div>
+<p class="note">Die Stufe „Text+Akzent“ (Homograph-BERT und Akzentor) läuft im Endstand C auf der CPU und kostet bei „lang“ auf Metal 47,3 ms, auf CPU 33,4 ms. Sie ist auf Metal ein größerer Anteil, weil die übrigen Stufen dort schneller sind.</p>
+</section>
+
+<section id="aenderungen">
+<h2>f) Was sich geändert hat</h2>
+<ul class="changes">
+<li><strong>Transformer contiguous</strong>: Layouts vor den GEMMs zusammenhängend halten.</li>
+<li><strong>GELU-CPU-Schnellpfad</strong>: parallele Polynom-Näherung statt <code>gelu_erf</code> (nur CPU).</li>
+<li><strong>ISTFT Head/parallel</strong>: Spektrum auf einmal auslesen, Overlap-Add außerhalb der Metal-Sperre und parallel.</li>
+<li><strong>Parallele Chunks (CPU)</strong>: <code>synthesize_text</code> rechnet mehrere Chunks gleichzeitig (höchstens 8), Ergebnis bitgleich zur sequenziellen Variante.</li>
+<li><strong>Schlanker Pfad</strong>: Zwischenergebnisse früh freigeben, keine Satzkopie.</li>
+<li><strong>NTC / conv2 zu Linear</strong>: Layout NTC, eine 1x1-Faltung als Linear.</li>
+<li><strong>ConvNeXt fusioniert auf Metal</strong>: Punktweise Ketten im ConvNeXt-Block und im Head zusammengefasst.</li>
+<li><strong>Metal-Sperre</strong>: GPU-Stufen mehrerer Chunks laufen nacheinander durch eine Sperre bis zum Readback.</li>
+</ul>
+<p><strong>Verworfene Experimente</strong> (kein Teil des Endstands, hier keine Zahlen): F16-Rechnung, FxHash für die n-Gramm-Tabelle, <code>rayon::join</code> über die Prädiktoren, kombinierter Readback, <code>PER_BUFFER</code>.</p>
+</section>
+
+<section id="aequivalenz">
+<h2>g) Numerische Gleichwertigkeit</h2>
+<p>Größte absolute Abweichung der Audiowerte (Float, Bereich etwa ±1) gegenüber Zustand A auf demselben Gerät, dasselbe Modell ohne Wörterbuch. Die Längen stimmen überall überein.</p>
+<table><thead><tr><th>Gerät</th><th>Eingabe</th><th class="n">B vs. A</th><th class="n">C vs. A</th></tr></thead><tbody><tr><td>CPU</td><td>kurz</td><td class="n">7,2e-06</td><td class="n">7,2e-06</td></tr><tr><td>CPU</td><td>lang</td><td class="n">1,2e-05</td><td class="n">1,2e-05</td></tr><tr><td>CPU</td><td>Corpus</td><td class="n">6,5e-05</td><td class="n">6,5e-05</td></tr><tr><td>Metal</td><td>kurz</td><td class="n">0</td><td class="n">1,5e-05</td></tr><tr><td>Metal</td><td>lang</td><td class="n">0</td><td class="n">5,4e-05</td></tr><tr><td>Metal</td><td>Corpus</td><td class="n">0</td><td class="n">5,8e-05</td></tr></tbody></table>
+<p>CPU: kleine Abweichungen (bis 6,5e-05) durch die Polynom-GELU; B und C sind auf der CPU zueinander gleich. Metal: B ist bitgleich zu A. C weicht auf Metal bis 5,8e-05 ab, wegen der fusionierten Kerne; das liegt über den früher erwarteten rund 1e-6.</p>
+<p>Zum Vergleich Metal gegen CPU im selben Stand:</p>
+<table><thead><tr><th>Eingabe</th><th class="n">A: Metal vs. CPU</th><th class="n">C: Metal vs. CPU</th></tr></thead><tbody><tr><td>kurz</td><td class="n">1,2e-05</td><td class="n">1,6e-05</td></tr><tr><td>lang</td><td class="n">2,5e-04</td><td class="n">2,1e-04</td></tr><tr><td>Corpus</td><td class="n">2,7e-04</td><td class="n">2,8e-04</td></tr></tbody></table>
+</section>
+<footer><p>Erzeugt aus <code>docs/messungen-rohdaten.json</code>. Die Zahlen der Fable-Messung (Abschnitt d) stammen aus einer früheren Messreihe und sind als solche markiert; alle übrigen Zahlen stammen aus den Läufen vom 2026-11-16.</p></footer>
+</main>
+</body>
+</html>
