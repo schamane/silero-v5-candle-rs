@@ -8,6 +8,10 @@ CIS packages can bundle the Ukrainian n-gram accentor; for `v5_cis_ext` it is
 optional and only applied to `ukr_*` voices. The other CIS languages in those
 packages are not wired up yet: they need the `ext_alph` conversion.
 
+**This project is 100% AI-based.** All code, tests, benchmarks and documentation
+were written by AI coding agents; the maintainer directs the work, reviews the
+result and owns the releases.
+
 The crate is a port of the Silero TorchScript pipeline and owns all of it:
 
 - text frontend: normalization, symbol mapping, chunk splitting;

@@ -23,6 +23,7 @@ Update `SPEC-STE.md` in the same change whenever you alter any of: public API, C
 ## Hard rules
 
 - No MSRV bump (`rust-version` in `Cargo.toml`) and no public API change without explicit user approval.
+- Every commit is authored and committed as `Nazar Kulyk <nazar.kulyk@ibsolution.de>` (the GitHub `nazarkulyk` account); no `Co-Authored-By` trailers, no other identities, no contributor credits for AI tools. Rewriting history to enforce this is allowed and force-pushing the result to `main` is expected.
 - `has_cyrillic` stays а–я/ё; `has_text` uses `is_alphabetic` (A-142).
 - Output is always 48 kHz. Plain text only, no SSML (R-TTS-31, R-TTS-32).
 - `accelerate` and `mkl` features are mutually exclusive.
